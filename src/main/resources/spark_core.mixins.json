@@ -1,0 +1,15 @@
+{
+  "required": true,
+  "minVersion": "0.8.5",
+  "package": "cn.solarmoon.spark_core.mixin",
+  "compatibilityLevel": "JAVA_17",
+  "refmap": "spark_core.refmap.json",
+  "mixins": [
+    "LevelMixin",
+    "EntityMixin",
+    "ServerLevelMixin"
+  ],
+  "injectors": {
+    "defaultRequire": 1
+  }
+}

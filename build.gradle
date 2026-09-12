@@ -1,0 +1,204 @@
+buildscript {
+    repositories {
+        maven { url = 'https://repo.spongepowered.org/repository/maven-public/' }
+        mavenCentral()
+    }
+    dependencies {
+        classpath 'org.spongepowered:mixingradle:0.7-SNAPSHOT'
+    }
+}
+
+plugins {
+    id 'eclipse'
+    id 'idea'
+    id 'maven-publish'
+    id 'org.jetbrains.kotlin.jvm' version "${kotlin_version}"
+    id 'net.minecraftforge.gradle' version '[6.0.16,6.2)'
+}
+
+apply plugin: 'org.spongepowered.mixin'
+
+group = mod_group_id
+version = mod_version
+
+base { archivesName = mod_id }
+
+java {
+    toolchain.languageVersion = JavaLanguageVersion.of(17)
+    withSourcesJar()
+}
+
+kotlin { jvmToolchain(17) }
+
+minecraft {
+    mappings channel: mapping_channel, version: mapping_version
+    accessTransformer = file('src/main/resources/META-INF/accesstransformer.cfg')
+    enableIdeaPrepareRuns = true
+    copyIdeResources = true
+
+    runs {
+        configureEach {
+            workingDirectory project.file('run')
+            property 'forge.logging.markers', 'REGISTRIES'
+            property 'forge.logging.console.level', 'info'
+            property 'mixin.env.remapRefMap', 'true'
+            property 'mixin.env.refMapRemappingFile', "${buildDir}/createSrgToMcp/output.srg"
+            mods { "${mod_id}" { source sourceSets.main } }
+        }
+        client { property 'forge.enabledGameTestNamespaces', mod_id }
+        server {
+            property 'forge.enabledGameTestNamespaces', mod_id
+            args '--nogui'
+        }
+        gameTestServer { property 'forge.enabledGameTestNamespaces', mod_id }
+        data {
+            workingDirectory project.file('run-data')
+            args '--mod', mod_id, '--all', '--output', file('src/generated/resources/'), '--existing', file('src/main/resources/')
+        }
+    }
+}
+
+mixin {
+    add sourceSets.main, "${mod_id}.refmap.json"
+    config "${mod_id}.mixins.json"
+}
+
+sourceSets.main.resources {
+    srcDir 'src/generated/resources'
+    srcDir layout.buildDirectory.dir('generated/libbulletResources')
+    srcDir layout.buildDirectory.dir('generated/gametestResources')
+}
+
+configurations {
+    libbulletJava
+    libbulletLinux
+    libbulletWindows
+}
+
+repositories {
+    mavenCentral()
+    maven { name = 'KotlinForForge'; url = 'https://thedarkcolour.github.io/KotlinForForge/' }
+}
+
+dependencies {
+    minecraft "net.minecraftforge:forge:${minecraft_version}-${forge_version}"
+    implementation "thedarkcolour:kotlinforforge:${kotlinforforge_version}"
+    // Keep the Java wrapper on ForgeGradle's development runtime classpath.
+    // libbulletJava is separate because it is also unpacked into the distributable mod JAR.
+    implementation "com.github.stephengold:Libbulletjme-Windows64:${libbulletjme_version}"
+
+    libbulletJava "com.github.stephengold:Libbulletjme-Windows64:${libbulletjme_version}"
+    libbulletLinux "com.github.stephengold:Libbulletjme-Linux64:${libbulletjme_version}:SpMtRelease"
+    libbulletWindows "com.github.stephengold:Libbulletjme-Windows64:${libbulletjme_version}:SpMtRelease"
+    annotationProcessor 'org.spongepowered:mixin:0.8.5:processor'
+    testImplementation 'org.junit.jupiter:junit-jupiter-api:5.10.2'
+    testRuntimeOnly 'org.junit.jupiter:junit-jupiter-engine:5.10.2'
+}
+
+tasks.register('extractLibbulletNatives', Sync) {
+    into layout.buildDirectory.dir('generated/libbulletResources')
+    from({ configurations.libbulletLinux.collect { zipTree(it) } }) {
+        include '**/*.so'
+        eachFile { details -> details.path = "natives/linux/x86_64/${details.name}" }
+        includeEmptyDirs = false
+    }
+    from({ configurations.libbulletWindows.collect { zipTree(it) } }) {
+        include '**/*.dll'
+        eachFile { details -> details.path = "natives/windows/x86_64/${details.name}" }
+        includeEmptyDirs = false
+    }
+}
+
+// ForgeGradle launches an exploded mod from source-set output directories. Plain
+// implementation JARs stay on the bootstrap classpath and are not visible to the
+// transforming module layer, so mirror the embedded wrapper classes into an
+// additional main output directory for development runs. The distributable JAR
+// embeds the same directory and therefore remains a single, standalone mod file.
+tasks.register('extractLibbulletClasses', Sync) {
+    into layout.buildDirectory.dir('generated/libbulletClasses')
+    from({ configurations.libbulletJava.collect { zipTree(it) } }) {
+        exclude 'META-INF/**', 'module-info.class', '**/*.dll', '**/*.so', '**/*.dylib'
+    }
+}
+
+// A one-block structure is enough for the terrain-collision integration test.
+// Generate it deterministically instead of committing an opaque binary NBT file.
+tasks.register('generateGameTestStructure') {
+    def output = layout.buildDirectory.file('generated/gametestResources/data/spark_core/structures/empty.nbt')
+    outputs.file(output)
+    doLast {
+        File target = output.get().asFile
+        target.parentFile.mkdirs()
+        target.withOutputStream { raw ->
+            def data = new DataOutputStream(new java.util.zip.GZIPOutputStream(raw))
+            data.writeByte(10); data.writeUTF('')
+            data.writeByte(3); data.writeUTF('DataVersion'); data.writeInt(3465)
+            data.writeByte(9); data.writeUTF('size'); data.writeByte(3); data.writeInt(3)
+            data.writeInt(1); data.writeInt(1); data.writeInt(1)
+            data.writeByte(9); data.writeUTF('palette'); data.writeByte(10); data.writeInt(1)
+            data.writeByte(8); data.writeUTF('Name'); data.writeUTF('minecraft:stone'); data.writeByte(0)
+            data.writeByte(9); data.writeUTF('blocks'); data.writeByte(10); data.writeInt(1)
+            data.writeByte(9); data.writeUTF('pos'); data.writeByte(3); data.writeInt(3)
+            data.writeInt(0); data.writeInt(0); data.writeInt(0)
+            data.writeByte(3); data.writeUTF('state'); data.writeInt(0); data.writeByte(0)
+            data.writeByte(9); data.writeUTF('entities'); data.writeByte(10); data.writeInt(0)
+            data.writeByte(0)
+            data.close()
+        }
+    }
+}
+
+sourceSets.main.output.classesDirs.from(layout.buildDirectory.dir('generated/libbulletClasses'))
+sourceSets.main.output.classesDirs.builtBy(tasks.named('extractLibbulletClasses'))
+
+tasks.named('classes').configure {
+    dependsOn tasks.named('extractLibbulletClasses')
+}
+
+tasks.named('processResources', ProcessResources).configure {
+    dependsOn tasks.named('extractLibbulletNatives'), tasks.named('generateGameTestStructure')
+    def props = [minecraft_version: minecraft_version, minecraft_version_range: minecraft_version_range,
+                 forge_version: forge_version, forge_version_range: forge_version_range,
+                 loader_version_range: loader_version_range, mod_id: mod_id, mod_name: mod_name,
+                 mod_license: mod_license, mod_version: mod_version, mod_authors: mod_authors,
+                 mod_description: mod_description, kotlinforforge_version: kotlinforforge_version]
+    inputs.properties props
+    filesMatching(['META-INF/mods.toml', 'pack.mcmeta']) { expand props + [project: project] }
+}
+
+tasks.named('sourcesJar', Jar).configure {
+    dependsOn tasks.named('extractLibbulletNatives'), tasks.named('generateGameTestStructure')
+    exclude 'natives/**'
+    exclude 'data/spark_core/structures/empty.nbt'
+}
+
+tasks.named('jar', Jar).configure {
+    duplicatesStrategy = DuplicatesStrategy.EXCLUDE
+    dependsOn tasks.named('extractLibbulletClasses')
+    from('LICENSE.txt') { into 'META-INF'; rename { 'LICENSE_spark_core.txt' } }
+    from('THIRD_PARTY_NOTICES.md') { into 'META-INF' }
+    manifest {
+        attributes 'Specification-Title': mod_id,
+                'Specification-Version': '1',
+                'Implementation-Title': project.name,
+                'Implementation-Version': project.jar.archiveVersion,
+                'MixinConfigs': "${mod_id}.mixins.json"
+    }
+    finalizedBy 'reobfJar'
+}
+
+tasks.withType(JavaCompile).configureEach { options.encoding = 'UTF-8' }
+tasks.withType(org.jetbrains.kotlin.gradle.tasks.KotlinCompile).configureEach {
+    compilerOptions.jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17)
+}
+
+test { useJUnitPlatform() }
+
+publishing {
+    publications {
+        mavenJava(MavenPublication) {
+            from components.java
+            artifactId = mod_id
+        }
+    }
+}
