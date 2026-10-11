@@ -16,6 +16,13 @@ sealed interface PhysicsBodyEvent {
         val self: PhysicsCollisionObject,
         val other: PhysicsCollisionObject,
         val selfPoint: ManifoldPoint,
-        val otherPoint: ManifoldPoint
+        val otherPoint: ManifoldPoint,
+        val snapshot: ContactSnapshot
+    ) : PhysicsBodyEvent
+    /** Contact response sampled after Bullet has solved the current substep. */
+    data class ResolvedContact(
+        val self: PhysicsCollisionObject,
+        val other: PhysicsCollisionObject,
+        val snapshot: ContactSnapshot
     ) : PhysicsBodyEvent
 }

@@ -48,3 +48,4 @@ fun PhysicsCollisionObject.onTick(handler: (PhysicsBodyEvent.Tick) -> Unit) = on
 fun PhysicsCollisionObject.onPrePhysicsTick(handler: (PhysicsBodyEvent.PhysicsTick.Pre) -> Unit) = onBodyEvent(handler)
 fun PhysicsCollisionObject.onPostPhysicsTick(handler: (PhysicsBodyEvent.PhysicsTick.Post) -> Unit) = onBodyEvent(handler)
 fun PhysicsCollisionObject.onCollideProcessed(handler: (PhysicsBodyEvent.Contact) -> Unit) = onBodyEvent(handler)
+fun PhysicsCollisionObject.onResolvedContact(handler: (PhysicsBodyEvent.ResolvedContact) -> Unit) = onBodyEvent(handler)

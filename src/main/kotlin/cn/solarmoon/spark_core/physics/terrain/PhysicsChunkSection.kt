@@ -19,9 +19,11 @@ class PhysicsChunkSection(
     internal val revision = AtomicLong(0)
     @Volatile internal var buildFuture: Future<*>? = null
     @Volatile internal var body: PhysicsRigidBody? = null
+    @Volatile internal var meshBody: PhysicsRigidBody? = null
     @Volatile internal var active = false
+    @Volatile internal var appliedRevision: Long = -1
     @Volatile internal var lastSnapshot: SectionSnapshot? = null
 
     fun isActive(): Boolean = active
-    fun isBuilt(): Boolean = body != null
+    fun isBuilt(): Boolean = body != null || meshBody != null
 }

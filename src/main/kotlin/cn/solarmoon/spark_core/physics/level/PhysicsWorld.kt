@@ -8,6 +8,7 @@ import com.jme3.bullet.PhysicsSoftSpace
 import com.jme3.bullet.PhysicsSpace
 import com.jme3.bullet.SolverMode
 import com.jme3.bullet.collision.PhysicsCollisionObject
+import com.jme3.bullet.collision.PersistentManifolds
 import com.jme3.bullet.objects.PhysicsBody
 import com.jme3.math.Vector3f
 import net.minecraftforge.common.MinecraftForge
@@ -53,9 +54,23 @@ class PhysicsWorld(val level: PhysicsLevel) : PhysicsSoftSpace(
         val pointB = ManifoldPoint(manifoldPointId, 1)
         bodyA.isColliding = true
         bodyB.isColliding = true
-        bodyA.triggerBodyEvent(PhysicsBodyEvent.Contact(bodyA, bodyB, pointA, pointB))
-        bodyB.triggerBodyEvent(PhysicsBodyEvent.Contact(bodyB, bodyA, pointB, pointA))
+        bodyA.triggerBodyEvent(PhysicsBodyEvent.Contact(bodyA, bodyB, pointA, pointB, snapshotContact(manifoldPointId, 0, bodyA, bodyB)))
+        bodyB.triggerBodyEvent(PhysicsBodyEvent.Contact(bodyB, bodyA, pointB, pointA, snapshotContact(manifoldPointId, 1, bodyB, bodyA)))
         MinecraftForge.EVENT_BUS.post(PhysicsContactEvent(bodyA, bodyB, pointA, pointB, manifoldPointId))
+    }
+
+    /** Called after solver completion, while manifold pointers still belong to this substep. */
+    fun dispatchResolvedContacts() {
+        for (manifold in listManifoldIds()) {
+            val bodyA = PhysicsCollisionObject.findInstance(PersistentManifolds.getBodyAId(manifold)) ?: continue
+            val bodyB = PhysicsCollisionObject.findInstance(PersistentManifolds.getBodyBId(manifold)) ?: continue
+            for (point in PersistentManifolds.listPointIds(manifold)) {
+                val a = snapshotContact(point, 0, bodyA, bodyB)
+                val b = snapshotContact(point, 1, bodyB, bodyA)
+                bodyA.triggerBodyEvent(PhysicsBodyEvent.ResolvedContact(bodyA, bodyB, a))
+                bodyB.triggerBodyEvent(PhysicsBodyEvent.ResolvedContact(bodyB, bodyA, b))
+            }
+        }
     }
 
     override fun addCollisionObject(body: PhysicsCollisionObject) {

@@ -67,8 +67,12 @@ open class PhysicsLevel(
 
     lateinit var world: PhysicsWorld
         private set
-    val terrainManager = PhysicsChunkManager(this)
-    val blockShapeManager = BlockShapeManager(this)
+    // The concrete ServerPhysicsLevel/ClientPhysicsLevel overrides mcLevel.  Do
+    // not construct managers while the base constructor is still running:
+    // Kotlin dispatches the open property to the not-yet-initialized override,
+    // which made the NoCubes adapter receive a null Level during world startup.
+    val terrainManager: PhysicsChunkManager by lazy(LazyThreadSafetyMode.NONE) { PhysicsChunkManager(this) }
+    val blockShapeManager: BlockShapeManager by lazy(LazyThreadSafetyMode.NONE) { BlockShapeManager(this) }
     val state: PhysicsLevelState get() = stateRef.get()
     val latestFrame: PhysicsFrameSnapshot get() = frameRef.get()
     val tickCount: Long get() = physicsTick.get()
@@ -203,8 +207,10 @@ open class PhysicsLevel(
         world.pcoList.forEach { body ->
             val frame = body.captureFrame()
             bodies[body] = frame
-            if (!body.isStatic && body.collideWithGroups and CollisionGroups.TERRAIN != 0) {
-                activation.add(frame.boundingBox)
+            val requestsTerrain = body.collideWithGroups and CollisionGroups.TERRAIN != 0 ||
+                body.collisionGroup and CollisionGroups.CHASSIS != 0
+            if ((!body.isStatic || (body is PhysicsRigidBody && body.isKinematic)) && requestsTerrain) {
+                activation.add(frame.boundingBox.expandTowards(frame.linearVelocity.scale(0.5)))
             }
         }
         val completed = System.nanoTime()
@@ -312,6 +318,7 @@ open class PhysicsLevel(
     }
 
     override fun physicsTick(space: PhysicsSpace, timeStep: Float) {
+        world.dispatchResolvedContacts()
         world.pcoList.forEach { it.triggerBodyEvent(PhysicsBodyEvent.PhysicsTick.Post) }
         processTasks(PPhase.ALL)
         processTasks(PPhase.POST)

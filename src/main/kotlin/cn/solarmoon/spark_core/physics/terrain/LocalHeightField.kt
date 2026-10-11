@@ -113,6 +113,58 @@ class LocalHeightField(
             return LocalHeightField(minX, minZ, size, smoothed, friction.copyOf(), hard.copyOf())
         }
 
+        /** Build a support field from a static triangle surface. This is a
+         * sampling aid for wheels; the triangles themselves remain owned by
+         * the terrain collision provider. The highest upward-facing triangle
+         * under each column is selected, preserving real slope normals. */
+        @JvmStatic
+        fun fromTriangles(
+            minX: Int,
+            minZ: Int,
+            size: Int,
+            vertices: FloatArray,
+            indices: IntArray,
+            defaultHeight: Float,
+        ): LocalHeightField {
+            require(vertices.size % 3 == 0) { "triangle vertices must be xyz" }
+            require(indices.size % 3 == 0) { "triangle indices must be triples" }
+            val heights = FloatArray(size * size) { defaultHeight }
+            val friction = FloatArray(size * size) { 0.8f }
+            val hard = BooleanArray(size * size) { true }
+            for (z in 0 until size) for (x in 0 until size) {
+                val px = minX + x + 0.5f
+                val pz = minZ + z + 0.5f
+                var best = Float.NEGATIVE_INFINITY
+                var bestNy = 0f
+                var bestHeight = defaultHeight
+                var t = 0
+                while (t < indices.size) {
+                    val ia = indices[t++] * 3; val ib = indices[t++] * 3; val ic = indices[t++] * 3
+                    if (ia !in vertices.indices || ib !in vertices.indices || ic !in vertices.indices) continue
+                    val ax = vertices[ia]; val ay = vertices[ia + 1]; val az = vertices[ia + 2]
+                    val bx = vertices[ib]; val by = vertices[ib + 1]; val bz = vertices[ib + 2]
+                    val cx = vertices[ic]; val cy = vertices[ic + 1]; val cz = vertices[ic + 2]
+                    val v0x = bx - ax; val v0z = bz - az
+                    val v1x = cx - ax; val v1z = cz - az
+                    val den = v0x * v1z - v1x * v0z
+                    if (kotlin.math.abs(den) < 1.0e-6f) continue
+                    val qx = px - ax; val qz = pz - az
+                    val u = (qx * v1z - v1x * qz) / den
+                    val v = (v0x * qz - qx * v0z) / den
+                    if (u < -1.0e-4f || v < -1.0e-4f || u + v > 1.0001f) continue
+                    val y = ay + u * (by - ay) + v * (cy - ay)
+                    val nx = (by - ay) * (cz - az) - (bz - az) * (cy - ay)
+                    val ny = (bz - az) * (cx - ax) - (bx - ax) * (cz - az)
+                    val nz = (bx - ax) * (cy - ay) - (by - ay) * (cx - ax)
+                    if (ny > 1.0e-5f && (y > best || (kotlin.math.abs(y - best) < 1.0e-4f && ny > bestNy))) {
+                        best = y; bestHeight = y; bestNy = ny
+                    }
+                }
+                heights[z * size + x] = bestHeight
+            }
+            return LocalHeightField(minX, minZ, size, heights, friction, hard)
+        }
+
         @JvmStatic
         @JvmOverloads
         fun capture(

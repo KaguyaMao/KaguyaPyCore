@@ -3,7 +3,8 @@ package cn.solarmoon.spark_core.physics.terrain
 data class TerrainShapePlan(
     val sectionPos: net.minecraft.core.SectionPos,
     val revision: Long,
-    val boxes: List<ShapeBox>
+    val boxes: List<ShapeBox>,
+    val mesh: TriangleMeshPlan? = null,
 ) {
     data class ShapeBox(
         val centerX: Float,
@@ -46,7 +47,7 @@ data class TerrainShapePlan(
                     )
                 }
             }
-            return TerrainShapePlan(snapshot.sectionPos, snapshot.revision, output)
+            return TerrainShapePlan(snapshot.sectionPos, snapshot.revision, java.util.List.copyOf(output), snapshot.mesh)
         }
     }
 }
