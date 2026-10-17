@@ -7,7 +7,7 @@
   "mixins": [
     "LevelMixin",
     "EntityMixin",
-    "ServerLevelMixin"
+    "LevelChunkMixin"
   ],
   "injectors": {
     "defaultRequire": 1

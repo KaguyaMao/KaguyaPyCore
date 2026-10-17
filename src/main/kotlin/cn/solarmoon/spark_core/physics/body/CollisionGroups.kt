@@ -12,5 +12,11 @@ object CollisionGroups {
      * same-owner link-link pairs can be filtered while links still collide
      * with the chassis, wheels and terrain. */
     const val TRACK_LINK = 1 shl 6
+    /** Vehicle-only slope ramps for climbable one-block height differences.
+     * Only bodies that explicitly ask for SLOPE collide with them; every other
+     * object keeps colliding with the original block boxes. */
+    const val SLOPE = 1 shl 7
+    /** Terrain group mask for drivable ground: block boxes plus slope ramps. */
+    const val DRIVABLE = TERRAIN or SLOPE
     const val ALL = -1
 }

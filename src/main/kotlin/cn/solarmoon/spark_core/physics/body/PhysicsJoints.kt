@@ -56,9 +56,12 @@ object PhysicsJoints {
      * Chassis (A) to wheel (B). Constraint frame Y is suspension travel, X is the roll axle.
      * Frames are copied; callers may reuse/mutate the source matrices afterwards.
      *
-     * 该 API 的 [dampingRatio] 是 New6Dof 要求的无量纲求解器阻尼比，不是 N·s/m。
-     * 显式物理阻尼应使用 [guidedWheelAxle] 并在物理子步自行计算
-     * `2 * zeta * sqrt(k * mass)`；禁止把 N·s/m 数值传入本方法。
+     * 历史兼容接口仍将 [dampingRatio] 钳制在 [0,1]，保持既有调用行为。
+     * 注意：这不是底层 Spring2 的物理单位。Libbulletjme 22.0.3 所带
+     * Bullet 用 `kd * relativeVelocity * dt` 生成线性阻尼冲量，kd 为 N·s/m，
+     * 数值 1 不代表临界阻尼（JavaDoc 的 ratio 描述与原生实现不一致）。
+     * 新物理应直接配置原生 SI 系数，或使用 [guidedWheelAxle] 显式计算力；
+     * 不要用本兼容接口传递 SI 阻尼，否则会被历史钳制截断。
      */
     @JvmStatic
     fun wheelSuspension(
@@ -131,11 +134,19 @@ object PhysicsJoints {
         return dof
     }
 
+    /**
+     * Drive a wheel axle about its joint X axis. [velocity] is the forward roll
+     * of the chassis, in radians per second: positive values roll the vehicle
+     * toward +Z, the nose the authored layouts mark as the front. The Bullet
+     * rotational motor spins the opposite way under the identity-framed axles
+     * used by every vehicle, so the target is negated at this boundary and
+     * callers never see the raw constraint convention.
+     */
     @JvmStatic
     fun setRollMotor(dof: New6Dof, velocity: Float, maxForce: Float) {
         val motor = dof.getRotationMotor(0)
         motor.setMotorEnabled(maxForce > 0f)
-        motor.set(MotorParam.TargetVelocity, velocity)
+        motor.set(MotorParam.TargetVelocity, -velocity)
         motor.set(MotorParam.MaxMotorForce, maxForce)
     }
 

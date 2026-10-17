@@ -4,6 +4,8 @@ import com.jme3.bullet.collision.ManifoldPoints
 import com.jme3.math.Vector3f
 
 class ManifoldPoint(private val id: Long, val objectIndex: Int) {
+    /** Valid only during the contact callback; never retain this native handle. */
+    fun nativePointId(): Long = id
     fun appliedImpulse(): Float = ManifoldPoints.getAppliedImpulse(id)
     fun distance(): Float = ManifoldPoints.getDistance1(id)
     fun positionWorld(store: Vector3f = Vector3f()): Vector3f {

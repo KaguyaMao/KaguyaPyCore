@@ -9,36 +9,33 @@ import cn.solarmoon.spark_core.physics.body.name
 import cn.solarmoon.spark_core.physics.body.owner
 import cn.solarmoon.spark_core.physics.level.PhysicsLevel
 import cn.solarmoon.spark_core.physics.level.PhysicsWorld
-import com.jme3.bullet.collision.shapes.BoxCollisionShape
-import com.jme3.bullet.collision.shapes.CompoundCollisionShape
-import com.jme3.bullet.collision.shapes.MeshCollisionShape
-import com.jme3.bullet.collision.shapes.infos.IndexedMesh
 import com.jme3.bullet.objects.PhysicsRigidBody
 import com.jme3.math.Vector3f
 import net.minecraft.core.BlockPos
 import net.minecraft.core.SectionPos
 import net.minecraft.server.level.ServerLevel
 import net.minecraft.world.level.ChunkPos
+import net.minecraft.world.level.Level
+import net.minecraft.world.level.block.state.BlockState
 import net.minecraft.world.level.chunk.LevelChunk
 import net.minecraft.world.phys.AABB
 import net.minecraftforge.network.PacketDistributor
 import java.util.concurrent.*
 import java.util.concurrent.atomic.AtomicReference
+import kotlin.math.abs
 import kotlin.math.floor
 
 class PhysicsChunkManager(private val physicsLevel: PhysicsLevel) {
     companion object {
         // Terrain physics is a local cache around dynamic bodies. One section
-        // of horizontal padding covers the configured 10-block mesh radius.
+        // of horizontal padding covers the configured activation radius.
         const val BUILD_RADIUS_CHUNKS = 1
         const val CACHE_RETENTION_PADDING_SECTIONS = 1
         const val VERTICAL_BUILD_PADDING_SECTIONS = 1
         const val ACTIVATION_PADDING_BLOCKS = 2.0
-        const val MESH_RADIUS_BLOCKS = 10.0
-        const val MESH_RETENTION_RADIUS_BLOCKS = 12.0
         const val MAX_SNAPSHOTS_PER_TICK = 8
-        /** Keep Bullet's contact skin from lifting vehicles above the visible NoCubes surface. */
-        const val TERRAIN_MESH_MARGIN = 0.001f
+        /** Match the mesh-free box skin; the default .04 m rounds section seams. */
+        const val TERRAIN_BOX_MARGIN = 0.001f
     }
 
     private val chunks = ConcurrentHashMap<ChunkPos, PhysicsChunk>()
@@ -47,26 +44,58 @@ class PhysicsChunkManager(private val physicsLevel: PhysicsLevel) {
     private val networkDirtySections = ConcurrentHashMap.newKeySet<SectionPos>()
     private val readyPlans = ConcurrentLinkedQueue<TerrainShapePlan>()
     private val desiredActive = AtomicReference<Set<SectionPos>>(emptySet())
-    private val surfaceProvider = NoCubesSurfaceProvider(physicsLevel.mcLevel)
-    private var meshSections: Set<SectionPos> = emptySet()
-    @Volatile private var configurationVersion = surfaceProvider.configurationVersion
     private val stalePlans = java.util.concurrent.atomic.AtomicLong()
     private val rebuilds = java.util.concurrent.atomic.AtomicLong()
     private val buildNanos = java.util.concurrent.atomic.AtomicLong()
     private val cacheRequests = java.util.concurrent.atomic.AtomicLong()
     private val cacheHits = java.util.concurrent.atomic.AtomicLong()
+    private val unchangedCollisions = java.util.concurrent.atomic.AtomicLong()
+    private var peakBoxBodies = 0
+    private var peakActiveBoxBodies = 0
+    private var peakSlopeBodies = 0
+    private var remainingUpdateTraces = Integer.getInteger("spark.physics.terrainTraceUpdates", 0).coerceIn(0, 2000)
+    private var remainingRebuildTraces =
+        Integer.getInteger("spark.physics.terrainTraceRebuilds", 0).coerceIn(0, 40000)
+    private var remainingChangeTraces =
+        Integer.getInteger("spark.physics.terrainTraceChanges", 0).coerceIn(0, 40000)
+
+    /**
+     * Optional `minX,minZ,maxX,maxZ` trace filter. Only terrain activity that
+     * touches this block box is logged, so a diagnostic run can watch one test
+     * area without burning the whole budget on world-load and fixture churn.
+     */
+    private val traceArea: IntArray? = System.getProperty("spark.physics.terrainTraceArea")
+        ?.split(',')?.mapNotNull { it.trim().toIntOrNull() }?.takeIf { it.size == 4 }?.toIntArray()
+
+    private fun traceAllows(pos: BlockPos): Boolean {
+        val area = traceArea ?: return true
+        return pos.x >= area[0] && pos.x <= area[2] && pos.z >= area[1] && pos.z <= area[3]
+    }
+
+    private fun traceAllows(section: SectionPos): Boolean {
+        val area = traceArea ?: return true
+        val minX = section.minBlockX()
+        val minZ = section.minBlockZ()
+        return minX + 15 >= area[0] && minX <= area[2] && minZ + 15 >= area[1] && minZ <= area[3]
+    }
 
     /** Physics-thread readiness test, including empty (but successfully built) sections. */
-    fun isReady(box: AABB): Boolean {
+    fun isReady(box: AABB): Boolean = readinessIssue(box) == null
+
+    /** Detached, diagnostic-only description; called on the physics worker. */
+    fun readinessIssue(box: AABB): String? {
         for (x in (floor(box.minX).toInt() shr 4)..(floor(box.maxX).toInt() shr 4))
             for (y in (floor(box.minY).toInt() shr 4)..(floor(box.maxY).toInt() shr 4))
                 for (z in (floor(box.minZ).toInt() shr 4)..(floor(box.maxZ).toInt() shr 4)) {
                     if (y < physicsLevel.mcLevel.minSection || y >= physicsLevel.mcLevel.maxSection) continue
                     val key = SectionPos.of(x, y, z)
-                    val section = sections[key] ?: return false
-                    if (!section.active || section.appliedRevision != section.revision.get() || key in dirtySections) return false
+                    val section = sections[key] ?: return "missing:$key"
+                    if (!section.active) return "inactive:$key"
+                    if (section.appliedRevision != section.revision.get())
+                        return "revision:$key applied=${section.appliedRevision} requested=${section.revision.get()}"
+                    if (key in dirtySections) return "dirty:$key"
                 }
-        return true
+        return null
     }
     private val builderExecutor: ExecutorService = Executors.newFixedThreadPool(
         (Runtime.getRuntime().availableProcessors() / 2).coerceIn(1, 2)
@@ -74,11 +103,13 @@ class PhysicsChunkManager(private val physicsLevel: PhysicsLevel) {
 
     fun onChunkLoaded(chunk: LevelChunk) {
         chunks.computeIfAbsent(chunk.pos) { PhysicsChunk(chunk.pos, physicsLevel, chunk) }
+        dirtyMarginNeighbours(chunk.pos)
     }
 
     fun onChunkUnloaded(pos: ChunkPos) {
         val chunk = chunks.remove(pos) ?: return
         unloadSections(chunk)
+        dirtyMarginNeighbours(pos)
     }
 
     fun unloadPhysicsChunk(pos: ChunkPos) {
@@ -92,21 +123,89 @@ class PhysicsChunkManager(private val physicsLevel: PhysicsLevel) {
             section.revision.incrementAndGet()
             section.buildFuture?.cancel(false)
             physicsLevel.submitImmediateTask {
-                discardBody(physicsLevel.worldOrNull(), section.body)
-                discardBody(physicsLevel.worldOrNull(), section.meshBody)
-                section.body = null
-                section.meshBody = null
+                section.bodies.forEach { discardBody(physicsLevel.worldOrNull(), it) }
+                section.slopeBodies.forEach { discardBody(physicsLevel.worldOrNull(), it) }
+                section.bodies = emptyList()
+                section.slopeBodies = emptyList()
                 section.active = false
             }
         }
     }
 
-    fun markDirty(pos: BlockPos) {
-        // SurfaceNets needs neighboring voxels, including across section boundaries.
+    /**
+     * A chunk load/unload changes the one-block slope margin of the sections
+     * next to it. Only cached sections can react immediately; the rest are
+     * rebuilt from scratch when they enter the cache.
+     */
+    private fun dirtyMarginNeighbours(pos: ChunkPos) {
+        val changed = sections.keys.filter {
+            (it.x() != pos.x || it.z() != pos.z) &&
+                abs(it.x() - pos.x) <= 1 && abs(it.z() - pos.z) <= 1
+        }
+        if (changed.isNotEmpty()) markDirty(changed.toSet())
+    }
+
+    fun onBlockChanged(pos: BlockPos, oldState: BlockState, newState: BlockState) {
+        val traced = remainingUpdateTraces > 0 && sections.containsKey(SectionPos.of(pos)) && traceAllows(pos)
+        if (traced) {
+            remainingUpdateTraces--
+            SparkCore.LOGGER.info("[terrain-update] {} pos={} old={} new={}", physicsLevel.name, pos, oldState, newState)
+        }
+        // A state change is not necessarily a collision change (leaf distance,
+        // grass spread, etc.). Compare the detached geometry of just this block
+        // before invalidating anything: identical boxes cannot change any
+        // section, and no support is ever retained from a real edit.
+        val previous = collisionBoxes(physicsLevel.mcLevel, pos, oldState)
+        val current = collisionBoxes(physicsLevel.mcLevel, pos, newState)
+        if (previous == current) {
+            unchangedCollisions.incrementAndGet()
+            return
+        }
+        if (remainingChangeTraces > 0 && traceAllows(pos) && current.isEmpty() && previous.isNotEmpty()) {
+            remainingChangeTraces--
+            SparkCore.LOGGER.info(
+                "[terrain-change] {} pos={} old={} new={} boxes={}->{}",
+                physicsLevel.name, pos, oldState, newState, previous.size, current.size
+            )
+        }
+        markDirty(affectedSections(pos))
+    }
+
+    private fun collisionBoxes(level: Level, pos: BlockPos, state: BlockState): List<AABB> {
+        if (state.isAir) return emptyList()
+        val voxel = state.getCollisionShape(level, pos)
+        if (voxel.isEmpty) return emptyList()
+        return voxel.toAabbs()
+    }
+
+    private fun affectedSections(pos: BlockPos): Set<SectionPos> {
+        // Slope planning reads a one-block margin, and contextual collision
+        // shapes connect across section borders, so a change on a border also
+        // invalidates the adjacent sections that can see it. Note that
+        // SectionPos.of(int, int, int) takes section coordinates, so the block
+        // coordinates must be shifted first - passing them raw marked sections
+        // that never exist and silently dropped every edit.
         val affected = HashSet<SectionPos>()
-        for (x in -2..2 step 2) for (y in -2..2 step 2) for (z in -2..2 step 2)
-            affected.add(SectionPos.of(pos.offset(x, y, z)))
-        markDirty(affected)
+        val sectionX = pos.x shr 4
+        val sectionY = pos.y shr 4
+        val sectionZ = pos.z shr 4
+        val localX = pos.x and 15
+        val localY = pos.y and 15
+        val localZ = pos.z and 15
+        for (dx in -1..1) for (dy in -1..1) for (dz in -1..1) {
+            if (dx < 0 && localX != 0) continue
+            if (dx > 0 && localX != 15) continue
+            if (dy < 0 && localY != 0) continue
+            if (dy > 0 && localY != 15) continue
+            if (dz < 0 && localZ != 0) continue
+            if (dz > 0 && localZ != 15) continue
+            affected.add(SectionPos.of(sectionX + dx, sectionY + dy, sectionZ + dz))
+        }
+        return affected
+    }
+
+    fun markDirty(pos: BlockPos) {
+        markDirty(affectedSections(pos))
     }
 
     fun markDirty(positions: Set<SectionPos>) {
@@ -116,28 +215,6 @@ class PhysicsChunkManager(private val physicsLevel: PhysicsLevel) {
 
     fun tickMainThread(activationBoxes: List<AABB>) {
         val sectionsToBuild = HashSet<SectionPos>()
-        val nearby = HashSet<SectionPos>()
-        val retainedMesh = HashSet<SectionPos>()
-        activationBoxes.forEach { raw ->
-            val box = raw.inflate(MESH_RADIUS_BLOCKS)
-            for (x in (floor(box.minX).toInt() shr 4)..(floor(box.maxX).toInt() shr 4))
-                for (y in (floor(box.minY).toInt() shr 4)..(floor(box.maxY).toInt() shr 4))
-                    for (z in (floor(box.minZ).toInt() shr 4)..(floor(box.maxZ).toInt() shr 4))
-                        nearby.add(SectionPos.of(x, y, z))
-            val retentionBox = raw.inflate(MESH_RETENTION_RADIUS_BLOCKS)
-            for (x in (floor(retentionBox.minX).toInt() shr 4)..(floor(retentionBox.maxX).toInt() shr 4))
-                for (y in (floor(retentionBox.minY).toInt() shr 4)..(floor(retentionBox.maxY).toInt() shr 4))
-                    for (z in (floor(retentionBox.minZ).toInt() shr 4)..(floor(retentionBox.maxZ).toInt() shr 4))
-                        retainedMesh.add(SectionPos.of(x, y, z))
-        }
-        val nextMeshSections = (meshSections intersect retainedMesh) + nearby
-        dirtySections.addAll((meshSections - nextMeshSections) + (nextMeshSections - meshSections))
-        meshSections = nextMeshSections
-        val config = surfaceProvider.configurationVersion
-        if (config != configurationVersion) {
-            configurationVersion = config
-            dirtySections.addAll(sections.keys)
-        }
         val sectionsToRetain = HashSet<SectionPos>()
         activationBoxes.forEach { box ->
             val minX = SectionPos.blockToSectionCoord(floor(box.minX).toInt()) - BUILD_RADIUS_CHUNKS
@@ -173,10 +250,10 @@ class PhysicsChunkManager(private val physicsLevel: PhysicsLevel) {
             section.revision.incrementAndGet()
             section.buildFuture?.cancel(false)
             physicsLevel.submitImmediateTask {
-                discardBody(physicsLevel.worldOrNull(), section.body)
-                discardBody(physicsLevel.worldOrNull(), section.meshBody)
-                section.body = null
-                section.meshBody = null
+                section.bodies.forEach { discardBody(physicsLevel.worldOrNull(), it) }
+                section.slopeBodies.forEach { discardBody(physicsLevel.worldOrNull(), it) }
+                section.bodies = emptyList()
+                section.slopeBodies = emptyList()
                 section.active = false
             }
         }
@@ -230,11 +307,18 @@ class PhysicsChunkManager(private val physicsLevel: PhysicsLevel) {
         section.buildFuture?.cancel(false)
         val started = System.nanoTime()
         val snapshot = try {
-            SectionSnapshot.snapshotFromChunk(physicsLevel.mcLevel, section.chunk, section.sectionPos, revision,
-                if (section.sectionPos in meshSections) surfaceProvider else null)
-        } catch (error: Exception) {
-            SparkCore.LOGGER.warn("Terrain surface unavailable in {}; using blocks", section.sectionPos, error)
             SectionSnapshot.snapshotFromChunk(physicsLevel.mcLevel, section.chunk, section.sectionPos, revision)
+        } catch (error: Exception) {
+            SparkCore.LOGGER.warn("Terrain snapshot failed in {}; retrying next tick", section.sectionPos, error)
+            markDirty(setOf(section.sectionPos))
+            return
+        }
+        if (remainingRebuildTraces > 0 && traceAllows(section.sectionPos)) {
+            remainingRebuildTraces--
+            SparkCore.LOGGER.info(
+                "[terrain-rebuild] schedule {} revision={} blocks={}",
+                section.sectionPos, revision, snapshot.blocks.size
+            )
         }
         section.lastSnapshot = snapshot
         section.buildFuture = builderExecutor.submit {
@@ -252,79 +336,77 @@ class PhysicsChunkManager(private val physicsLevel: PhysicsLevel) {
 
     fun physicsTick(world: PhysicsWorld) {
         physicsLevel.assertPhysicsThread()
+        var bodiesChanged = false
         while (true) {
             val plan = readyPlans.poll() ?: break
             val section = sections[plan.sectionPos] ?: continue
-            if (section.revision.get() != plan.revision ||
-                (plan.mesh != null && !plan.mesh.isCurrent(plan.revision, configurationVersion))) {
+            if (section.revision.get() != plan.revision) {
                 stalePlans.incrementAndGet()
                 continue
             }
             replaceBody(world, section, plan)
+            bodiesChanged = true
         }
 
         val desired = desiredActive.get()
         sections.values.forEach { section ->
             val shouldBeActive = section.sectionPos in desired
             if (shouldBeActive != section.active) {
-                setActive(world, section.body, shouldBeActive)
-                setActive(world, section.meshBody, shouldBeActive)
+                section.bodies.forEach { setActive(world, it, shouldBeActive) }
+                section.slopeBodies.forEach { setActive(world, it, shouldBeActive) }
                 section.active = shouldBeActive
+                bodiesChanged = true
             }
+        }
+        // Sample only when the native cache changes, not every physics substep.
+        // Peaks remain useful after test vehicles release their chunks.
+        if (bodiesChanged) {
+            peakBoxBodies = maxOf(peakBoxBodies, sections.values.sumOf { it.bodies.size })
+            peakActiveBoxBodies = maxOf(peakActiveBoxBodies,
+                sections.values.filter { it.active }.sumOf { it.bodies.size })
+            peakSlopeBodies = maxOf(peakSlopeBodies, sections.values.sumOf { it.slopeBodies.size })
         }
     }
 
     private fun replaceBody(world: PhysicsWorld, section: PhysicsChunkSection, plan: TerrainShapePlan) {
-        val compound = CompoundCollisionShape()
-        plan.boxes.forEach { box ->
-            if (box.halfX > 0f && box.halfY > 0f && box.halfZ > 0f) {
-                compound.addChildShape(
-                    BoxCollisionShape(Vector3f(box.halfX, box.halfY, box.halfZ)),
-                    Vector3f(box.centerX, box.centerY, box.centerZ)
-                )
-            }
-        }
-        val body = if (plan.boxes.isEmpty()) null else PhysicsRigidBody(compound, 0f).apply {
-            name = "section_${section.sectionPos.asLong()}"
-            owner = section
-            collisionGroup = CollisionGroups.TERRAIN
-            setCollideWithGroups(CollisionGroups.NONE)
-            setPhysicsLocation(
-                Vector3f(
-                    section.sectionPos.minBlockX() + 8f,
-                    section.sectionPos.minBlockY() + 8f,
-                    section.sectionPos.minBlockZ() + 8f
-                )
-            )
-        }
-        val meshBody = plan.mesh?.snapshot?.let { mesh ->
-            val origin = section.sectionPos
-            val positions = Array(mesh.vertexCount) { index ->
-                Vector3f((mesh.coordinate(index, 0) - origin.minBlockX() - 8).toFloat(),
-                    (mesh.coordinate(index, 1) - origin.minBlockY() - 8).toFloat(),
-                    (mesh.coordinate(index, 2) - origin.minBlockZ() - 8).toFloat())
-            }
-            val shape = MeshCollisionShape(true, IndexedMesh(positions, mesh.indices)).apply {
-                margin = TERRAIN_MESH_MARGIN
-            }
-            PhysicsRigidBody(shape, 0f).apply {
-                name = "terrain_mesh_${origin.asLong()}"
+        val origin = section.sectionPos
+        val bodies = TerrainBoxBodies.create(plan.boxes, Vector3f(
+            origin.minBlockX() + 8f, origin.minBlockY() + 8f, origin.minBlockZ() + 8f
+        )).onEachIndexed { index, body ->
+            body.apply {
+                name = "section_${origin.asLong()}_box_$index"
                 owner = section
                 collisionGroup = CollisionGroups.TERRAIN
                 setCollideWithGroups(CollisionGroups.NONE)
-                setPhysicsLocation(Vector3f(origin.minBlockX() + 8f, origin.minBlockY() + 8f, origin.minBlockZ() + 8f))
             }
         }
-        // Construct first, then swap both bodies at a physics-step boundary.
+        val slopes = TerrainSlopeBodies.create(plan.slopes, Vector3f(
+            origin.minBlockX() + 8f, origin.minBlockY() + 8f, origin.minBlockZ() + 8f
+        )).onEachIndexed { index, body ->
+            body.apply {
+                name = "section_${origin.asLong()}_slope_$index"
+                owner = section
+                collisionGroup = CollisionGroups.SLOPE
+                setCollideWithGroups(CollisionGroups.NONE)
+            }
+        }
+        // Construct first, then swap all convex bodies at a step boundary.
         // Native objects become reclaimable only after removal from the world.
-        discardBody(world, section.body)
-        discardBody(world, section.meshBody)
-        section.body = body
-        section.meshBody = meshBody
+        section.bodies.forEach { discardBody(world, it) }
+        section.slopeBodies.forEach { discardBody(world, it) }
+        if (remainingRebuildTraces > 0 && traceAllows(origin)) {
+            remainingRebuildTraces--
+            SparkCore.LOGGER.info(
+                "[terrain-rebuild] apply {} boxes={} slopes={} revision={}",
+                origin, bodies.size, slopes.size, plan.revision
+            )
+        }
+        section.bodies = bodies
+        section.slopeBodies = slopes
         section.appliedRevision = plan.revision
         section.active = section.sectionPos in desiredActive.get()
-        setActive(world, body, section.active)
-        setActive(world, meshBody, section.active)
+        bodies.forEach { setActive(world, it, section.active) }
+        slopes.forEach { setActive(world, it, section.active) }
     }
 
     private fun setActive(world: PhysicsWorld, body: PhysicsRigidBody?, active: Boolean) {
@@ -344,10 +426,12 @@ class PhysicsChunkManager(private val physicsLevel: PhysicsLevel) {
     fun rebind(world: PhysicsWorld) {
         physicsLevel.assertPhysicsThread()
         sections.values.forEach { section ->
-            section.body?.let { body ->
+            section.bodies.forEach { body ->
                 if (section.active && !body.isInWorld) world.addCollisionObject(body)
             }
-            setActive(world, section.meshBody, section.active)
+            section.slopeBodies.forEach { body ->
+                if (section.active && !body.isInWorld) world.addCollisionObject(body)
+            }
         }
     }
 
@@ -356,10 +440,10 @@ class PhysicsChunkManager(private val physicsLevel: PhysicsLevel) {
         sections.values.forEach { section ->
             section.revision.incrementAndGet()
             section.buildFuture?.cancel(false)
-            discardBody(world, section.body)
-            discardBody(world, section.meshBody)
-            section.body = null
-            section.meshBody = null
+            section.bodies.forEach { discardBody(world, it) }
+            section.slopeBodies.forEach { discardBody(world, it) }
+            section.bodies = emptyList()
+            section.slopeBodies = emptyList()
         }
         sections.clear()
         chunks.clear()
@@ -381,8 +465,14 @@ class PhysicsChunkManager(private val physicsLevel: PhysicsLevel) {
         val requests = cacheRequests.get()
         val hitRate = if (requests == 0L) 0.0 else cacheHits.get().toDouble() * 100.0 / requests
         return "chunks=${chunks.size}, sections=${sections.size}, active=${sections.values.count { it.active }}, " +
-        "triangles=${sections.values.sumOf { it.lastSnapshot?.mesh?.snapshot?.triangleCount ?: 0 }}, " +
-        "cacheHit=${"%.2f".format(java.util.Locale.ROOT, hitRate)}%, rebuilds=${rebuilds.get()}, " +
+            "boxBodies=${sections.values.sumOf { it.bodies.size }}, " +
+            "activeBoxBodies=${sections.values.filter { it.active }.sumOf { it.bodies.size }}, " +
+            "slopes=${sections.values.sumOf { it.slopeBodies.size }}, " +
+            "activeSlopes=${sections.values.filter { it.active }.sumOf { it.slopeBodies.size }}, " +
+            "peakBoxBodies=$peakBoxBodies, peakActiveBoxBodies=$peakActiveBoxBodies, " +
+            "peakSlopes=$peakSlopeBodies, " +
+            "cacheHit=${"%.2f".format(java.util.Locale.ROOT, hitRate)}%, rebuilds=${rebuilds.get()}, " +
+            "unchangedCollisions=${unchangedCollisions.get()}, " +
         "buildMs=${buildNanos.get() / 1_000_000}, queue=${dirtySections.size + readyPlans.size}, stale=${stalePlans.get()}"
     }
 }

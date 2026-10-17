@@ -18,12 +18,13 @@ class PhysicsChunkSection(
     override val allPhysicsBodies: MutableMap<String, PhysicsCollisionObject> = ConcurrentHashMap()
     internal val revision = AtomicLong(0)
     @Volatile internal var buildFuture: Future<*>? = null
-    @Volatile internal var body: PhysicsRigidBody? = null
-    @Volatile internal var meshBody: PhysicsRigidBody? = null
+    @Volatile internal var bodies: List<PhysicsRigidBody> = emptyList()
+    /** Vehicle-only slope wedges generated from the same snapshot. */
+    @Volatile internal var slopeBodies: List<PhysicsRigidBody> = emptyList()
     @Volatile internal var active = false
     @Volatile internal var appliedRevision: Long = -1
     @Volatile internal var lastSnapshot: SectionSnapshot? = null
 
     fun isActive(): Boolean = active
-    fun isBuilt(): Boolean = body != null || meshBody != null
+    fun isBuilt(): Boolean = bodies.isNotEmpty() || slopeBodies.isNotEmpty()
 }
