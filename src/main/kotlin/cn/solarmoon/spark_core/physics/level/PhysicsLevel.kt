@@ -70,7 +70,7 @@ open class PhysicsLevel(
     // The concrete ServerPhysicsLevel/ClientPhysicsLevel overrides mcLevel.  Do
     // not construct managers while the base constructor is still running:
     // Kotlin dispatches the open property to the not-yet-initialized override,
-    // which made the NoCubes adapter receive a null Level during world startup.
+    // which would hand the managers a null Level during world startup.
     val terrainManager: PhysicsChunkManager by lazy(LazyThreadSafetyMode.NONE) { PhysicsChunkManager(this) }
     val blockShapeManager: BlockShapeManager by lazy(LazyThreadSafetyMode.NONE) { BlockShapeManager(this) }
     val state: PhysicsLevelState get() = stateRef.get()
@@ -107,8 +107,17 @@ open class PhysicsLevel(
     /**
      * Return the closest Spark terrain hit for [query]. This API may only be
      * used from PRE/POST callbacks on the physics thread.
+     *
+     * [groups] selects which terrain collision groups count as a hit. The
+     * default includes the generated climb wedges; pass [CollisionGroups.TERRAIN]
+     * to read the raw block collision only. A climbable-step decision must use
+     * the raw column, otherwise the wedge it generated raises the "low" side
+     * and hides the very step it was built for.
      */
-    fun raycastClosestTerrain(query: TerrainRayQuery): TerrainRayHit? {
+    fun raycastClosestTerrain(query: TerrainRayQuery): TerrainRayHit? =
+        raycastClosestTerrain(query, CollisionGroups.DRIVABLE)
+
+    fun raycastClosestTerrain(query: TerrainRayQuery, groups: Int): TerrainRayHit? {
         assertPhysicsThread()
         if (!::world.isInitialized || !query.isFinite()) return null
 
@@ -123,7 +132,7 @@ open class PhysicsLevel(
             if (TerrainRayMath.shouldReplaceClosest(
                     candidate.hitFraction,
                     candidate.collisionObject.collisionGroup,
-                    CollisionGroups.TERRAIN,
+                    groups,
                     closestFraction,
                 )
             ) {
@@ -207,7 +216,7 @@ open class PhysicsLevel(
         world.pcoList.forEach { body ->
             val frame = body.captureFrame()
             bodies[body] = frame
-            val requestsTerrain = body.collideWithGroups and CollisionGroups.TERRAIN != 0 ||
+            val requestsTerrain = body.collideWithGroups and CollisionGroups.DRIVABLE != 0 ||
                 body.collisionGroup and CollisionGroups.CHASSIS != 0
             if ((!body.isStatic || (body is PhysicsRigidBody && body.isKinematic)) && requestsTerrain) {
                 activation.add(frame.boundingBox.expandTowards(frame.linearVelocity.scale(0.5)))

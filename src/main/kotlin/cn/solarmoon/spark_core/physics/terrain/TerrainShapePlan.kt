@@ -4,7 +4,8 @@ data class TerrainShapePlan(
     val sectionPos: net.minecraft.core.SectionPos,
     val revision: Long,
     val boxes: List<ShapeBox>,
-    val mesh: TriangleMeshPlan? = null,
+    /** Vehicle-only slope wedges for climbable height differences. */
+    val slopes: List<ShapeSlope> = emptyList(),
 ) {
     data class ShapeBox(
         val centerX: Float,
@@ -13,6 +14,21 @@ data class TerrainShapePlan(
         val halfX: Float,
         val halfY: Float,
         val halfZ: Float
+    )
+
+    /** One preprocessed slope wedge in section-local coordinates.
+     * [lowX]/[lowZ] and [highX]/[highZ] are the low and high ends of the
+     * run, expressed as the two horizontal corners of the wedge triangle.
+     * [halfWidth] extends the wedge to both sides of the run direction.
+     */
+    data class ShapeSlope(
+        val lowX: Float,
+        val lowZ: Float,
+        val lowY: Float,
+        val highX: Float,
+        val highZ: Float,
+        val highY: Float,
+        val halfWidth: Float,
     )
 
     companion object {
@@ -26,10 +42,27 @@ data class TerrainShapePlan(
                     val key = Triple(x, y, z)
                     if (key !in full || key in consumed) { x++; continue }
                     var end = x + 1
-                    while (end < 16 && Triple(end, y, z) in full) end++
-                    for (value in x until end) consumed.add(Triple(value, y, z))
+                    fun available(px: Int, py: Int, pz: Int): Boolean {
+                        val cell = Triple(px, py, pz)
+                        return cell in full && cell !in consumed
+                    }
+                    while (end < 16 && available(end, y, z)) end++
+                    // Merge complete rectangular prisms, not just X rows.
+                    // Internal row seams give convex sweeps rounded edge normals
+                    // even on a perfectly level floor. Never bridge a missing voxel.
+                    var endZ = z + 1
+                    while (endZ < 16 && (x until end).all { available(it, y, endZ) }) endZ++
+                    var endY = y + 1
+                    while (endY < 16 && (z until endZ).all { pz ->
+                        (x until end).all { px -> available(px, endY, pz) }
+                    }) endY++
+                    for (py in y until endY) for (pz in z until endZ) for (px in x until end)
+                        consumed.add(Triple(px, py, pz))
                     val width = end - x
-                    output.add(ShapeBox(x + width / 2f - 8f, y + .5f - 8f, z + .5f - 8f, width / 2f, .5f, .5f))
+                    val height = endY - y
+                    val depth = endZ - z
+                    output.add(ShapeBox(x + width / 2f - 8f, y + height / 2f - 8f, z + depth / 2f - 8f,
+                        width / 2f, height / 2f, depth / 2f))
                     x = end
                 }
             }
@@ -47,7 +80,8 @@ data class TerrainShapePlan(
                     )
                 }
             }
-            return TerrainShapePlan(snapshot.sectionPos, snapshot.revision, java.util.List.copyOf(output), snapshot.mesh)
+            return TerrainShapePlan(snapshot.sectionPos, snapshot.revision, java.util.List.copyOf(output),
+                TerrainSlopePlanner.build(snapshot))
         }
     }
 }

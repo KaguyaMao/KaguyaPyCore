@@ -13,7 +13,6 @@ import net.minecraftforge.event.TickEvent
 import net.minecraftforge.event.entity.EntityJoinLevelEvent
 import net.minecraftforge.event.entity.EntityLeaveLevelEvent
 import net.minecraftforge.event.level.ChunkEvent
-import net.minecraftforge.event.level.ChunkTicketLevelUpdatedEvent
 import net.minecraftforge.event.level.LevelEvent
 import net.minecraftforge.eventbus.api.EventPriority
 import net.minecraftforge.eventbus.api.SubscribeEvent
@@ -47,12 +46,10 @@ object PhysicsLevelEvents {
         SparkPhysics.get(level).terrainManager.onChunkUnloaded(event.chunk.pos)
     }
 
-    @SubscribeEvent
-    fun onChunkTicketChanged(event: ChunkTicketLevelUpdatedEvent) {
-        if (event.newTicketLevel > 33) {
-            SparkPhysics.get(event.level).terrainManager.unloadPhysicsChunk(net.minecraft.world.level.ChunkPos(event.chunkPos))
-        }
-    }
+    // Ticket levels describe ticking eligibility, not chunk lifetime. Loaded
+    // neighbors may still supply collision for a nearby dynamic body. The local
+    // terrain cache evicts out-of-range sections; ChunkEvent.Unload removes the
+    // remaining bodies when the actual chunk leaves the level.
 
     @SubscribeEvent
     fun onEntityJoin(event: EntityJoinLevelEvent) {

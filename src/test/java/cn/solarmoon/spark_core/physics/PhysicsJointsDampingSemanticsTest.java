@@ -13,17 +13,16 @@ import org.junit.jupiter.api.Test;
 import static org.junit.jupiter.api.Assertions.*;
 
 /**
- * 锁定 New6Dof 悬挂 API 的阻尼语义，防止单位误用。
+ * 锁定历史 wheelSuspension 包装接口的钳制行为，不推断底层物理单位。
  *
- * wheelSuspension 的 damping 参数必须是无量纲求解器阻尼比（0=无阻尼、1=临界阻尼），
- * 而不是物理阻尼系数 c = 2ζ√(km)（单位 N·s/m，量级可达数万）。
- * 传入 N·s/m 会被 coerceIn(0,1) 钳制为 1.0（伪临界阻尼），这正说明它绝不是阻尼系数单元。
- * 显式物理阻尼必须使用 guidedWheelAxle（禁用内置弹簧）并在物理子步自行计算。
+ * 包装器将 damping 钳制在 [0,1] 仅是兼容策略，读回 1.0 不能证明临界阻尼。
+ * Libbulletjme 22.0.3 所带 Spring2 原生求解使用 N·s/m 系数；真正的动力学
+ * 单位回归见 NativeSpringDampingTest。这里不改变旧调用的运行行为。
  */
 class PhysicsJointsDampingSemanticsTest {
 
     @Test
-    void wheelSuspensionOnlyAcceptsDimensionlessRatioAndIsaNspMValueIsClamped() {
+    void legacyWheelSuspensionClampsDampingWithoutProvingNativeUnits() {
         NativePhysicsLoader.load();
         PhysicsSpace space = new PhysicsSpace(PhysicsSpace.BroadphaseType.DBVT);
         PhysicsRigidBody chassis = null;
@@ -46,13 +45,13 @@ class PhysicsJointsDampingSemanticsTest {
                     712_000f, 83_000f); // 83_000 是 N·s/m，不是阻尼比
 
             assertTrue(joint.isSpringEnabled(LIN_Y), "wheelSuspension enables the built-in spring");
-            // 读回阻尼：API 仅支持 [0,1]，N·s/m 被钳制为 1.0（临界阻尼），绝不原样保留。
+            // 这是包装器的 coerceIn，不是原生 API 的单位或可接受范围限制。
             float damping = joint.getTranslationMotor()
                     .get(MotorParam.Damping, new Vector3f()).y;
             assertEquals(1.0f, damping, 1.0e-3f,
-                    "N·s/m damping must be clamped to 1.0 (dimensionless critical damping)");
+                    "Legacy wrapper still clamps damping to 1.0");
 
-            // 对比：合理的无量纲阻尼比（0.70）应原样保留而非钳制。
+            // 历史 [0,1] 输入原样保留；不把 0.70 宣称为原生阻尼比。
             good = PhysicsJoints.wheelSuspension(
                     chassis, wheelBody,
                     new Vector3f(0f, -0.5f, 0f), new Vector3f(0f, 0f, 0f),
