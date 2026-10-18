@@ -2,6 +2,7 @@ package cn.solarmoon.spark_core.physics.body
 
 import com.jme3.bullet.RotationOrder
 import com.jme3.bullet.joints.New6Dof
+import com.jme3.bullet.joints.SixDofSpringJoint
 import com.jme3.bullet.joints.motors.MotorParam
 import com.jme3.bullet.objects.PhysicsRigidBody
 import com.jme3.math.Matrix3f
@@ -97,6 +98,57 @@ object PhysicsJoints {
         lock(dof, ANG_Y)
         lock(dof, ANG_Z)
         return dof
+    }
+
+
+    /**
+     * Machine-Max style independent wheel: one revolute axle whose Y axis is a
+     * real spring. Uses `SixDofSpringJoint` (the legacy `btGeneric6DofSpringConstraint`
+     * wrapper) rather than `New6Dof`: the spring2 row rejects SI damping through
+     * `limitIfNeeded` and silently rewrites the stiffness, which made every
+     * joint-sprung wheel collapse onto its bump stop.
+     *
+     * [stiffness] is N/m and [damping] is N·s/m, both passed through unchanged.
+     * [equilibrium] is the Y displacement where the spring is relaxed; with a
+     * positive value the spring is already compressed at the bind pose.
+     */
+    @JvmStatic
+    fun wheelAxleSpring(
+        chassis: PhysicsRigidBody,
+        wheel: PhysicsRigidBody,
+        pivotInChassis: Vector3f,
+        pivotInWheel: Vector3f,
+        minTravel: Float,
+        maxTravel: Float,
+        stiffness: Float,
+        damping: Float,
+        equilibrium: Float,
+    ): SixDofSpringJoint {
+        // `SixDofSpringJoint` can only snap the equilibrium to the *current*
+        // relative pose, so place the wheel at the preloaded offset first, create
+        // and calibrate the spring, then return the wheel to its bind pose.
+        val original = wheel.getPhysicsLocation(null)
+        val rotation = chassis.getPhysicsRotation(null)
+        val matrix = rotation.toRotationMatrix()
+        val preloaded = chassis.getPhysicsLocation(null)
+            .add(matrix.mult(Vector3f(pivotInChassis).addLocal(0f, equilibrium, 0f), null))
+        wheel.setPhysicsLocation(preloaded)
+        val joint = SixDofSpringJoint(
+            chassis, wheel,
+            Vector3f(pivotInChassis), Vector3f(pivotInWheel),
+            Matrix3f(), Matrix3f(), true,
+        )
+        // Locked X/Z translation, limited Y travel, free X rotation, locked Y/Z.
+        joint.setLinearLowerLimit(Vector3f(0f, minTravel, 0f))
+        joint.setLinearUpperLimit(Vector3f(0f, maxTravel, 0f))
+        joint.setAngularLowerLimit(Vector3f(-Math.PI.toFloat(), 0f, 0f))
+        joint.setAngularUpperLimit(Vector3f(Math.PI.toFloat(), 0f, 0f))
+        joint.enableSpring(LIN_Y, true)
+        joint.setStiffness(LIN_Y, stiffness)
+        joint.setDamping(LIN_Y, damping)
+        joint.setEquilibriumPoint(LIN_Y)
+        wheel.setPhysicsLocation(original)
+        return joint
     }
 
     /**
