@@ -46,6 +46,29 @@ abstract class CollisionObjectEntity(type: EntityType<*>, level: Level) : Entity
     }
 
     abstract val body: PhysicsCollisionObject
+
+    /**
+     * True once [body] exists. A subclass that creates its native body on the
+     * physics thread sets this false in its init block and flips it true from
+     * [createDeferredBody]. Lifecycle code must not touch [body] before then.
+     */
+    @Volatile
+    protected var bodyReady: Boolean = true
+
+    /** Read-only view for lifecycle code and tests. */
+    val isBodyReady: Boolean get() = bodyReady
+
+    /**
+     * Physics-thread hook. It must assign [body] and is called once, before the
+     * body joins the world. Override together with `bodyReady = false`.
+     */
+    protected open fun createDeferredBody() {
+        error("${javaClass.name} defers body creation but does not implement createDeferredBody()")
+    }
+
+    @Volatile
+    private var bodyGeneration = 0
+
     protected var updatingFromPhysics = false
     private var lerpPosition = Vec3.ZERO
     private var lerpViewAngles = Vec2.ZERO
@@ -77,6 +100,7 @@ abstract class CollisionObjectEntity(type: EntityType<*>, level: Level) : Entity
         rotationO = Quaternionf(rotation)
         scaleO = scale
         super.baseTick()
+        if (!bodyReady) return
         if (!level().isClientSide) {
             physicsLevel.latestFrame.bodies[body]?.let { frame ->
                 updatingFromPhysics = true
@@ -108,6 +132,7 @@ abstract class CollisionObjectEntity(type: EntityType<*>, level: Level) : Entity
     }
 
     fun onRawPosUpdated(x: Double, y: Double, z: Double) {
+        if (!bodyReady) return
         if (!updatingFromPhysics && isAddedToWorld) {
             submitBodyLocation(x, y, z)
         }
@@ -115,26 +140,43 @@ abstract class CollisionObjectEntity(type: EntityType<*>, level: Level) : Entity
 
     override fun onAddedToWorld() {
         super.onAddedToWorld()
-        body.owner = SparkPhysics.host(this)
+        val generation = ++bodyGeneration
+        val host = SparkPhysics.host(this)
         val x = this.x
         val y = this.y
         val z = this.z
         physicsLevel.submitImmediateTask {
-            body.setSparkLocation(BulletVector3f(x.toFloat(), y.toFloat(), z.toFloat()))
-            physicsApplicators.values.forEach { it() }
+            if (generation != bodyGeneration) return@submitImmediateTask
+            if (!bodyReady) {
+                createDeferredBody()
+                bodyReady = true
+            }
+            attachBodyOnPhysicsThread(host, x, y, z)
         }
-        level().addPhysicsBody(body)
+    }
+
+    /** Physics thread hook after the body is configured but before it joins the world. */
+    protected open fun onBodyAttached() {}
+
+    /** Physics thread only. Location and applicators are set before the world sees the body. */
+    private fun attachBodyOnPhysicsThread(host: cn.solarmoon.spark_core.physics.PhysicsHost, x: Double, y: Double, z: Double) {
+        body.owner = host
+        body.setSparkLocation(BulletVector3f(x.toFloat(), y.toFloat(), z.toFloat()))
+        physicsApplicators.values.forEach { it() }
+        onBodyAttached()
+        physicsLevel.addBody(body)
     }
 
     override fun onSyncedDataUpdated(key: EntityDataAccessor<*>) {
         super.onSyncedDataUpdated(key)
-        if (updatingFromPhysics) return
+        if (!bodyReady || updatingFromPhysics) return
         val applicator = physicsApplicators[key] ?: return
         physicsLevel.submitImmediateTask { applicator() }
     }
 
     override fun onRemovedFromWorld() {
-        level().removePhysicsBody(body)
+        bodyGeneration++
+        if (bodyReady) level().removePhysicsBody(body)
         super.onRemovedFromWorld()
     }
 

@@ -32,9 +32,17 @@ abstract class RigidBodyEntity(type: EntityType<*>, level: Level) : CollisionObj
 
     abstract override val body: PhysicsRigidBody
 
+    private var pendingKinematic: Boolean? = null
+
     var isKinematic: Boolean
-        get() = level().isClientSide || body.isKinematic
-        set(value) { physicsLevel.submitImmediateTask { body.isKinematic = value } }
+        get() = level().isClientSide || (bodyReady && body.isKinematic)
+        set(value) {
+            if (!bodyReady) {
+                pendingKinematic = value
+                return
+            }
+            physicsLevel.submitImmediateTask { body.isKinematic = value }
+        }
 
     var gravity by syncField(DATA_GRAVITY, ::vec3FromJoml, ::vec3ToJoml) { body.setGravity(it.toBullet()) }
     var isGravityProtected by syncField(DATA_GRAVITY_PROTECTED) { body.setProtectGravity(it) }
@@ -51,6 +59,7 @@ abstract class RigidBodyEntity(type: EntityType<*>, level: Level) : CollisionObj
 
     override fun baseTick() {
         super.baseTick()
+        if (!bodyReady) return
         if (!level().isClientSide) {
             physicsLevel.latestFrame.bodies[body]?.let { frame ->
                 updatingFromPhysics = true
@@ -62,6 +71,12 @@ abstract class RigidBodyEntity(type: EntityType<*>, level: Level) : CollisionObj
                 }
             }
         }
+    }
+
+    override fun onBodyAttached() {
+        val pending = pendingKinematic
+        if (pending != null) body.isKinematic = pending
+        else if (level().isClientSide) body.isKinematic = true
     }
 
     override fun recreateFromPacket(packet: ClientboundAddEntityPacket) {

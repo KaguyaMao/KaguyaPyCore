@@ -1,11 +1,16 @@
 package cn.solarmoon.spark_core.physics.terrain
 
+/**
+ * Immutable plain-data collision plan for one section.
+ *
+ * [boxes] are already merged rectangular prisms for full cubes plus the
+ * authored voxel boxes of partial shapes. There are no vehicle-only wedges:
+ * terrain collision is exactly the Minecraft block collision geometry.
+ */
 data class TerrainShapePlan(
     val sectionPos: net.minecraft.core.SectionPos,
     val revision: Long,
     val boxes: List<ShapeBox>,
-    /** Vehicle-only slope wedges for climbable height differences. */
-    val slopes: List<ShapeSlope> = emptyList(),
 ) {
     data class ShapeBox(
         val centerX: Float,
@@ -14,21 +19,6 @@ data class TerrainShapePlan(
         val halfX: Float,
         val halfY: Float,
         val halfZ: Float
-    )
-
-    /** One preprocessed slope wedge in section-local coordinates.
-     * [lowX]/[lowZ] and [highX]/[highZ] are the low and high ends of the
-     * run, expressed as the two horizontal corners of the wedge triangle.
-     * [halfWidth] extends the wedge to both sides of the run direction.
-     */
-    data class ShapeSlope(
-        val lowX: Float,
-        val lowZ: Float,
-        val lowY: Float,
-        val highX: Float,
-        val highZ: Float,
-        val highY: Float,
-        val halfWidth: Float,
     )
 
     companion object {
@@ -80,8 +70,7 @@ data class TerrainShapePlan(
                     )
                 }
             }
-            return TerrainShapePlan(snapshot.sectionPos, snapshot.revision, java.util.List.copyOf(output),
-                TerrainSlopePlanner.build(snapshot))
+            return TerrainShapePlan(snapshot.sectionPos, snapshot.revision, java.util.List.copyOf(output))
         }
     }
 }

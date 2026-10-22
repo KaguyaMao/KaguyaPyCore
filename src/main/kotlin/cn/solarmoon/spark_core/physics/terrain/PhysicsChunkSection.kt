@@ -19,12 +19,10 @@ class PhysicsChunkSection(
     internal val revision = AtomicLong(0)
     @Volatile internal var buildFuture: Future<*>? = null
     @Volatile internal var bodies: List<PhysicsRigidBody> = emptyList()
-    /** Vehicle-only slope wedges generated from the same snapshot. */
-    @Volatile internal var slopeBodies: List<PhysicsRigidBody> = emptyList()
     @Volatile internal var active = false
     @Volatile internal var appliedRevision: Long = -1
     @Volatile internal var lastSnapshot: SectionSnapshot? = null
 
     fun isActive(): Boolean = active
-    fun isBuilt(): Boolean = bodies.isNotEmpty() || slopeBodies.isNotEmpty()
+    fun isBuilt(): Boolean = bodies.isNotEmpty()
 }

@@ -10,6 +10,8 @@ import java.util.concurrent.CopyOnWriteArrayList
 import kotlin.reflect.KClass
 
 data class BodyRuntimeData(
+    /** Stable identity, unique for the lifetime of the process. */
+    val id: Long = nextBodyId.incrementAndGet(),
     @Volatile var name: String = UUID.randomUUID().toString(),
     @Volatile var owner: PhysicsHost? = null,
     @Volatile var colliding: Boolean = false,
@@ -17,7 +19,11 @@ data class BodyRuntimeData(
     @Volatile var showDebugWithoutMask: Boolean = false,
     @Volatile var attachedEntity: Entity? = null,
     val listeners: ConcurrentHashMap<KClass<out PhysicsBodyEvent>, CopyOnWriteArrayList<(PhysicsBodyEvent) -> Unit>> = ConcurrentHashMap()
-)
+) {
+    companion object {
+        private val nextBodyId = java.util.concurrent.atomic.AtomicLong(0)
+    }
+}
 
 object BodyRuntime {
     private val data = ConcurrentHashMap<PhysicsCollisionObject, BodyRuntimeData>()
@@ -28,6 +34,16 @@ object BodyRuntime {
         data.remove(body)?.listeners?.clear()
     }
 }
+
+/**
+ * Stable identity of a body, usable as a cross-thread snapshot key.
+ *
+ * The value survives world recreation because it lives in [BodyRuntime], not in
+ * the native object. Creating it on demand means a body that never had Spark
+ * metadata still gets a usable id.
+ */
+val PhysicsCollisionObject.bodyId: Long
+    get() = BodyRuntime.of(this).id
 
 var PhysicsCollisionObject.name: String
     get() = BodyRuntime.of(this).name

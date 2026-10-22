@@ -35,6 +35,23 @@ object PhysicsJoints {
     }
 
     /**
+     * Generic angular motor. [axis] is one of [ANG_X], [ANG_Y], [ANG_Z] and
+     * [velocity] is in the constraint's native coordinate convention.
+     *
+     * This is the vehicle-agnostic primitive. Callers that need a game-space
+     * forward direction must map it themselves; the core does not assume which
+     * world axis is "forward" for any vehicle.
+     */
+    @JvmStatic
+    fun setRotationMotor(dof: New6Dof, axis: Int, velocity: Float, maxForce: Float) {
+        require(axis in ANG_X..ANG_Z) { "angular motor axis must be ANG_X..ANG_Z: $axis" }
+        val motor = dof.getRotationMotor(axis - ANG_X)
+        motor.setMotorEnabled(maxForce > 0f)
+        motor.set(MotorParam.TargetVelocity, velocity)
+        motor.set(MotorParam.MaxMotorForce, maxForce)
+    }
+
+    /**
      * Compatible overload: identity frames, equilibrium at 0.
      */
     @JvmStatic
@@ -187,19 +204,18 @@ object PhysicsJoints {
     }
 
     /**
-     * Drive a wheel axle about its joint X axis. [velocity] is the forward roll
-     * of the chassis, in radians per second: positive values roll the vehicle
-     * toward +Z, the nose the authored layouts mark as the front. The Bullet
-     * rotational motor spins the opposite way under the identity-framed axles
-     * used by every vehicle, so the target is negated at this boundary and
-     * callers never see the raw constraint convention.
+     * Legacy vehicle-convention motor: [velocity] is the forward roll of a
+     * chassis that treats +Z as forward, so the target is negated before it
+     * reaches [setRotationMotor].
+     *
+     * New code should call [setRotationMotor] and own its own axis mapping. This
+     * overload remains for existing SuperbWarfare call sites and is not part of
+     * the generic core contract.
      */
+    @Deprecated("Use setRotationMotor and map the vehicle's forward direction in the caller")
     @JvmStatic
     fun setRollMotor(dof: New6Dof, velocity: Float, maxForce: Float) {
-        val motor = dof.getRotationMotor(0)
-        motor.setMotorEnabled(maxForce > 0f)
-        motor.set(MotorParam.TargetVelocity, -velocity)
-        motor.set(MotorParam.MaxMotorForce, maxForce)
+        setRotationMotor(dof, ANG_X, -velocity, maxForce)
     }
 
     /** Tightens the axle travel window; used to clamp a wheel inside a track envelope. */
@@ -209,14 +225,17 @@ object PhysicsJoints {
     }
 
     /**
-     * Machine-Max oleo pair: +forceN along [upWorld] on the chassis at [anchorWorld],
-     * equal and opposite on the wheel. Independent suspension must use
-     * [guidedWheelAxle] plus this force, never the built-in New6Dof spring.
+     * Apply a force pair at a world-space anchor: +[forceN] along [upWorld] on
+     * [bodyA], equal and opposite at [bodyB]'s center.
+     *
+     * This is a numeric helper only. Whether the force represents a suspension,
+     * a cable, or an impulse is the caller's policy. New suspension code should
+     * use [guidedWheelAxle] plus its own force law.
      */
     @JvmStatic
-    fun applyOleoForce(
-        chassis: PhysicsRigidBody,
-        wheel: PhysicsRigidBody,
+    fun applyPairedForce(
+        bodyA: PhysicsRigidBody,
+        bodyB: PhysicsRigidBody,
         upWorld: Vector3f,
         forceN: Float,
         anchorWorld: Vector3f,
@@ -228,22 +247,33 @@ object PhysicsJoints {
         val len = up.length()
         if (len < 1.0e-6f) up.set(0f, 1f, 0f) else up.multLocal(1f / len)
         val force = up.mult(forceN, Vector3f())
-        val chassisPos = chassis.getPhysicsLocation(null)
-        val rel = Vector3f(anchorWorld).subtractLocal(chassisPos)
-        chassis.applyForce(force, rel)
-        wheel.applyCentralForce(force.mult(-1f, Vector3f()))
-        chassis.activate(true)
-        wheel.activate(true)
+        val bodyAPos = bodyA.getPhysicsLocation(null)
+        val rel = Vector3f(anchorWorld).subtractLocal(bodyAPos)
+        bodyA.applyForce(force, rel)
+        bodyB.applyCentralForce(force.mult(-1f, Vector3f()))
+        bodyA.activate(true)
+        bodyB.activate(true)
     }
 
+    /** @deprecated Use [applyPairedForce]; this name encoded a suspension policy. */
+    @Deprecated("Use applyPairedForce; the core does not prescribe an oleo/suspension strategy")
+    @JvmStatic
+    fun applyOleoForce(
+        chassis: PhysicsRigidBody,
+        wheel: PhysicsRigidBody,
+        upWorld: Vector3f,
+        forceN: Float,
+        anchorWorld: Vector3f,
+    ) = applyPairedForce(chassis, wheel, upWorld, forceN, anchorWorld)
+
     /**
-     * Closed track-shoe hinge used by articulated belts.  Each shoe is a
-     * dynamic body; the hinge removes all relative translation, allows the
-     * shoe pair to wrap around a sprocket, and keeps lateral/yaw twist locked.
-     * The angular limit is deliberately finite so a bad contact cannot open a
-     * visible gap in the belt.  Built-in springs are never enabled here: belt
-     * tension is supplied by the wheel envelope and the drive sprocket.
+     * Legacy closed-shoe hinge. This duplicates the generic [New6Dof] setup now
+     * owned by TrackRun and is kept only for existing callers.
+     *
+     * @deprecated Build the constraint through `TrackRunAssembly` or a generic
+     * [New6Dof] with explicit frames instead.
      */
+    @Deprecated("Use TrackRunAssembly or a generic New6Dof; this helper fixes a shoe-specific policy")
     @JvmStatic
     fun trackLinkHinge(
         previous: PhysicsRigidBody,
@@ -275,11 +305,14 @@ object PhysicsJoints {
     }
 
     /**
-     * Carries one reference shoe with the sprung chassis while retaining the
-     * belt's physical hinge axis.  A closed chain needs one such anchor per
-     * side; without it the links are a free-falling loop and stay at the spawn
-     * position after the vehicle drives away.
+     * Legacy reference-shoe carrier.
+     *
+     * @deprecated This is not a valid general solution for a closed track: it
+     * pins one shoe's translation to the chassis and prevents that shoe from
+     * circulating with the belt. The core must not prescribe it. Retained only
+     * for existing callers until SBW moves to a wheel-envelope design.
      */
+    @Deprecated("Do not pin a circulating shoe to the chassis; this helper is legacy-only")
     @JvmStatic
     fun trackLinkCarrier(
         chassis: PhysicsRigidBody,
