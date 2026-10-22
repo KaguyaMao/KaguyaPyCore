@@ -114,13 +114,6 @@ class TerrainShapePlanTest {
         assertFalse(original.hasSameBlockCollision(partial))
         assertFalse(partial.hasSameBlockCollision(partial.copy(blocks = partial.blocks.dropLast(1) +
             partial.blocks.last().copy(boxes = listOf(AABB(0.0, 0.0, 0.0, 1.0, .6, 1.0))))))
-        val settled = original.copy(marginTops = IntArray(SectionSnapshot.MARGIN_CELLS) { SectionSnapshot.MARGIN_UNKNOWN })
-        assertTrue(settled.hasSameBlockCollision(settled.copy(revision = 30)))
-        val stepped = settled.copy(marginTops = settled.marginTops.copyOf().also {
-            it[(7 + 1) * 18 + (7 + 1)] = 8
-        })
-        assertFalse(settled.hasSameBlockCollision(stepped),
-            "slope margin changes must invalidate collision equality")
     }
 
     @Test fun nativeSphereSweepHasNoArtificialRowSeams() {

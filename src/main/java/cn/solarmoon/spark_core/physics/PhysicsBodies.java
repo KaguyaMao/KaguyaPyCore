@@ -34,6 +34,11 @@ public final class PhysicsBodies {
         return BodyRuntimeKt.isColliding(body);
     }
 
+    /** Stable cross-thread identity, matching {@code BodyFrame.bodyId}. */
+    public static long getId(PhysicsCollisionObject body) {
+        return BodyRuntimeKt.getBodyId(body);
+    }
+
     public static void attachToEntity(PhysicsRigidBody body, Entity entity) {
         PhysicsBodyExtensionsKt.attachToEntity(body, entity);
     }

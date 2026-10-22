@@ -89,7 +89,10 @@ class WheelRollMotorDirectionTest {
             space.addTickListener(object : PhysicsTickListener {
                 override fun prePhysicsTick(s: PhysicsSpace, dt: Float) {
                     wheels.forEach { wheel ->
-                        PhysicsJoints.setRollMotor(wheel.joint, demand, 20000f)
+                        // This fixture keeps the historical "+Z forward" mapping
+                        // locally; the core motor now takes the native
+                        // constraint sign and does not encode a vehicle axis.
+                        PhysicsJoints.setRotationMotor(wheel.joint, PhysicsJoints.ANG_X, -demand, 20000f)
                         wheel.body.activate(true)
                         val chassisY = chassis.getPhysicsLocation(Vector3f()).y
                         val wheelPos = wheel.body.getPhysicsLocation(Vector3f())

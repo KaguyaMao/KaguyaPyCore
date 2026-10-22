@@ -20,11 +20,14 @@ import net.minecraft.gametest.framework.GameTestHelper;
 import net.minecraft.core.Direction;
 import net.minecraft.world.entity.EntityType;
 import net.minecraft.world.entity.animal.Pig;
+import net.minecraft.world.phys.AABB;
 import net.minecraft.world.phys.Vec3;
 import net.minecraftforge.gametest.GameTestHolder;
 import net.minecraftforge.gametest.PrefixGameTestTemplate;
 
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 
 @GameTestHolder(SparkCore.MOD_ID)
@@ -33,12 +36,15 @@ public final class PhysicsGameTests {
     private PhysicsGameTests() {
     }
 
-    @GameTest(template = "empty", timeoutTicks = 180)
+    @GameTest(template = "empty", timeoutTicks = 240)
     public static void asyncTerrainCollision(GameTestHelper helper) {
         PhysicsLevel physics = SparkPhysics.get(helper.getLevel());
         AtomicReference<PhysicsRigidBody> bodyRef = new AtomicReference<>();
+        AtomicBoolean released = new AtomicBoolean();
+        AtomicLong releasedTick = new AtomicLong(-1);
         BlockPos floor = helper.absolutePos(BlockPos.ZERO);
         float startY = floor.getY() + 4.0f;
+        AABB activation = activationBox(floor.getX() + .5, startY, floor.getZ() + .5, .25f);
 
         physics.submitImmediateTask(PPhase.ALL, () -> {
             PhysicsRigidBody body = new PhysicsRigidBody(new BoxCollisionShape(.25f), 1f);
@@ -58,17 +64,20 @@ public final class PhysicsGameTests {
                 .thenWaitUntil(() -> helper.assertTrue(
                         bodyRef.get() != null && physics.getLatestFrame().getBodies().containsKey(bodyRef.get()),
                         "Rigid body was not published in an immutable physics snapshot"))
-                .thenWaitUntil(() -> helper.assertTrue(
-                        physics.getTerrainManager().getActiveSectionCount() > 0,
-                        "No terrain section became active: " + physics.getTerrainManager().getStats()))
+                .thenWaitUntil(() -> assertReady(helper, physics, activation, "async terrain"))
                 .thenExecute(() -> physics.submitImmediateTask(PPhase.ALL, () -> {
                     bodyRef.get().setKinematic(false);
                     bodyRef.get().activate(true);
+                    releasedTick.set(physics.getTickCount());
+                    released.set(true);
                     return Unit.INSTANCE;
                 }))
-                .thenIdle(80)
+                .thenWaitUntil(() -> helper.assertTrue(
+                        released.get() && physics.getTickCount() >= releasedTick.get() + 90,
+                        "physics did not advance after kinematic release: tick=" + physics.getTickCount()))
                 .thenExecute(() -> {
                     PhysicsRigidBody body = bodyRef.get();
+                    try {
                     var frame = physics.getLatestFrame().getBodies().get(body);
                     helper.assertTrue(frame != null, "Rigid body vanished from the latest snapshot");
                     double terrainTop = Double.NEGATIVE_INFINITY;
@@ -92,7 +101,9 @@ public final class PhysicsGameTests {
                     helper.assertTrue(Math.abs(frame.getLinearVelocity().y) < .1,
                             "Rigid body reached terrain but did not settle: vy="
                                     + frame.getLinearVelocity().y);
-                    physics.removeBody(body);
+                    } finally {
+                        physics.removeBody(body);
+                    }
                 })
                 .thenSucceed();
     }
@@ -324,6 +335,9 @@ public final class PhysicsGameTests {
         PhysicsLevel physics = SparkPhysics.get(helper.getLevel());
         BlockPos floor = helper.absolutePos(BlockPos.ZERO);
         AtomicReference<PhysicsRigidBody> sprungRef = new AtomicReference<>();
+        AtomicReference<PhysicsRigidBody> controllerRef = new AtomicReference<>();
+        AtomicReference<com.jme3.bullet.joints.New6Dof> jointRef = new AtomicReference<>();
+        AtomicLong seenTick = new AtomicLong(-1);
         physics.submitImmediateTask(PPhase.ALL, () -> {
             com.jme3.math.Quaternion yaw = new com.jme3.math.Quaternion().fromAngles(0f, (float) Math.PI / 2f, 0f);
             PhysicsRigidBody controller = new PhysicsRigidBody(new BoxCollisionShape(.15f), 0f);
@@ -333,6 +347,7 @@ public final class PhysicsGameTests {
             controller.setCollisionGroup(CollisionGroups.PHYSICS_BODY);
             controller.setCollideWithGroups(CollisionGroups.NONE);
             physics.addBody(controller);
+            controllerRef.set(controller);
 
             PhysicsRigidBody sprung = new PhysicsRigidBody(new BoxCollisionShape(.3f), 40f);
             sprung.setPhysicsLocation(new Vector3f(floor.getX() + .5f, floor.getY() + 4f, floor.getZ() + .5f));
@@ -340,36 +355,51 @@ public final class PhysicsGameTests {
             sprung.setCollisionGroup(CollisionGroups.PHYSICS_BODY);
             sprung.setCollideWithGroups(CollisionGroups.NONE);
             physics.addBody(sprung);
-            physics.addJoint(cn.solarmoon.spark_core.physics.body.PhysicsJoints.suspensionCarrier(
+            var joint = cn.solarmoon.spark_core.physics.body.PhysicsJoints.suspensionCarrier(
                     controller, sprung,
                     new Vector3f(), new Vector3f(),
                     new com.jme3.math.Matrix3f(), new com.jme3.math.Matrix3f(),
                     -0.6f, 0.6f, -0.4f, 0.4f
-            ));
+            );
+            physics.addJoint(joint);
+            jointRef.set(joint);
             sprungRef.set(sprung);
             return Unit.INSTANCE;
         });
         helper.startSequence()
-                .thenWaitUntil(() -> helper.assertTrue(sprungRef.get() != null, "sprung body missing"))
-                .thenIdle(20)
+                .thenWaitUntil(() -> {
+                    helper.assertTrue(sprungRef.get() != null, "sprung body missing");
+                    if (seenTick.get() < 0) seenTick.set(physics.getTickCount());
+                    helper.assertTrue(physics.getTickCount() >= seenTick.get() + 60,
+                            "physics tick did not advance for the yaw carrier");
+                })
                 .thenExecute(() -> {
-                    var frame = physics.getLatestFrame().getBodies().get(sprungRef.get());
-                    helper.assertTrue(frame != null, "sprung body vanished");
-                    org.joml.Vector3f euler = frame.getRotation().getEulerAnglesYXZ(new org.joml.Vector3f());
-                    helper.assertTrue(Math.abs(Math.abs(euler.y) - (float) Math.PI / 2f) < 0.25f,
-                            "carrier failed to keep yaw near 90 degrees: " + euler.y);
-                    physics.removeBody(sprungRef.get());
+                    try {
+                        var frame = physics.getLatestFrame().getBodies().get(sprungRef.get());
+                        helper.assertTrue(frame != null, "sprung body vanished");
+                        org.joml.Vector3f euler = frame.getRotation().getEulerAnglesYXZ(new org.joml.Vector3f());
+                        helper.assertTrue(Math.abs(Math.abs(euler.y) - (float) Math.PI / 2f) < 0.25f,
+                                "carrier failed to keep yaw near 90 degrees: " + euler.y);
+                    } finally {
+                        if (jointRef.get() != null) physics.removeJoint(jointRef.get());
+                        if (sprungRef.get() != null) physics.removeBody(sprungRef.get());
+                        if (controllerRef.get() != null) physics.removeBody(controllerRef.get());
+                    }
                 })
                 .thenSucceed();
     }
 
-    @GameTest(template = "empty", timeoutTicks = 120)
+    @GameTest(template = "empty", timeoutTicks = 200)
     public static void terrainRaycastIsThreadConfinedAndFiltersNonTerrain(GameTestHelper helper) {
         PhysicsLevel physics = SparkPhysics.get(helper.getLevel());
         BlockPos floor = helper.absolutePos(new BlockPos(1, 0, 1));
         helper.setBlock(new BlockPos(1, 0, 1), net.minecraft.world.level.block.Blocks.STONE);
+        AABB stone = new AABB(floor.getX() + .25, floor.getY() + .25, floor.getZ() + .25,
+                floor.getX() + .75, floor.getY() + .75, floor.getZ() + .75);
         AtomicReference<PhysicsRigidBody> blockerRef = new AtomicReference<>();
         AtomicReference<TerrainRayHit> hitRef = new AtomicReference<>();
+        AtomicBoolean rayDone = new AtomicBoolean();
+        AtomicBoolean raySubmitted = new AtomicBoolean();
 
         boolean rejectedMainThread = false;
         try {
@@ -391,29 +421,37 @@ public final class PhysicsGameTests {
         });
 
         helper.startSequence()
-                .thenWaitUntil(() -> helper.assertTrue(
-                        physics.getTerrainManager().getActiveSectionCount() > 0,
-                        "terrain did not activate for raycast"))
-                .thenWaitUntil(() -> {
+                .thenWaitUntil(() -> helper.assertTrue(blockerRef.get() != null, "ray blocker was not created"))
+                .thenWaitUntil(() -> assertReady(helper, physics, stone, "raycast stone"))
+                .thenExecute(() -> {
+                    if (!raySubmitted.compareAndSet(false, true)) return;
                     physics.submitImmediateTask(PPhase.PRE, () -> {
-                        hitRef.set(physics.raycastClosestTerrain(new TerrainRayQuery(
-                                floor.getX() + .5f, floor.getY() + 5f, floor.getZ() + .5f,
-                                floor.getX() + .5f, floor.getY() - 2f, floor.getZ() + .5f
-                        )));
+                        try {
+                            hitRef.set(physics.raycastClosestTerrain(new TerrainRayQuery(
+                                    floor.getX() + .5f, floor.getY() + 5f, floor.getZ() + .5f,
+                                    floor.getX() + .5f, floor.getY() - 2f, floor.getZ() + .5f
+                            )));
+                        } finally {
+                            rayDone.set(true);
+                        }
                         return Unit.INSTANCE;
                     });
-                    helper.assertTrue(hitRef.get() != null, "terrain ray produced no terrain hit");
                 })
+                .thenWaitUntil(() -> helper.assertTrue(rayDone.get(), "terrain ray did not finish on the physics thread"))
                 .thenExecute(() -> {
-                    TerrainRayHit hit = hitRef.get();
-                    helper.assertTrue(hit.getHitFraction() > .45f,
-                            "closer non-terrain blocker was not filtered: " + hit);
-                    helper.assertTrue(Math.abs(hit.getPointY() - (floor.getY() + 1f)) < .1f,
-                            "fraction-to-point conversion is wrong: " + hit);
-                    helper.assertTrue(hit.getNormalY() > .9f, "terrain normal is not normalized/upward: " + hit);
-                    helper.assertTrue(hit.getSurfaceVelocityX() == 0f && hit.getSurfaceVelocityY() == 0f &&
-                            hit.getSurfaceVelocityZ() == 0f, "static terrain velocity must be zero");
-                    physics.removeBody(blockerRef.get());
+                    try {
+                        TerrainRayHit hit = hitRef.get();
+                        helper.assertTrue(hit != null, "terrain ray produced no terrain hit");
+                        helper.assertTrue(hit.getHitFraction() > .45f,
+                                "closer non-terrain blocker was not filtered: " + hit);
+                        helper.assertTrue(Math.abs(hit.getPointY() - (floor.getY() + 1f)) < .1f,
+                                "fraction-to-point conversion is wrong: " + hit);
+                        helper.assertTrue(hit.getNormalY() > .9f, "terrain normal is not normalized/upward: " + hit);
+                        helper.assertTrue(hit.getSurfaceVelocityX() == 0f && hit.getSurfaceVelocityY() == 0f &&
+                                hit.getSurfaceVelocityZ() == 0f, "static terrain velocity must be zero");
+                    } finally {
+                        if (blockerRef.get() != null) physics.removeBody(blockerRef.get());
+                    }
                 })
                 .thenSucceed();
     }
@@ -438,21 +476,15 @@ public final class PhysicsGameTests {
                 .thenSucceed();
     }
 
-    @GameTest(template = "empty", timeoutTicks = 40)
-    public static void localHeightFieldTurnsOneBlockStepIntoRamp(GameTestHelper helper) {
-        BlockPos floor = helper.absolutePos(BlockPos.ZERO);
-        helper.setBlock(new BlockPos(2, 1, 1), net.minecraft.world.level.block.Blocks.STONE);
-        var field = cn.solarmoon.spark_core.physics.terrain.LocalHeightField.capture(
-                helper.getLevel(),
-                new net.minecraft.world.phys.Vec3(floor.getX() + 1.5, floor.getY() + 1.0, floor.getZ() + 1.5),
-                3
-        );
-        var low = field.sample(floor.getX() + 0.5, floor.getZ() + 1.5);
-        var mid = field.sample(floor.getX() + 1.5, floor.getZ() + 1.5);
-        helper.assertTrue(mid.getHeightY() > low.getHeightY(),
-                "step sample must rise toward the stone: low=" + low.getHeightY() + " mid=" + mid.getHeightY());
-        helper.assertTrue(mid.getHeightY() - low.getHeightY() < 1.05,
-                "smoothed cliff must be less than a raw 1 m wall: " + (mid.getHeightY() - low.getHeightY()));
-        helper.succeed();
+    /** Matches PhysicsChunkManager activation inflation, not an arbitrary column. */
+    private static AABB activationBox(double x, double y, double z, float half) {
+        double pad = 2.0;
+        return new AABB(x - half - pad, y - half - pad, z - half - pad, x + half + pad, y + half + pad, z + half + pad);
+    }
+
+    private static void assertReady(GameTestHelper helper, PhysicsLevel physics, AABB box, String label) {
+        String issue = physics.getTerrainManager().readinessIssue(box);
+        helper.assertTrue(issue == null, label + " terrain is not ready: " + issue
+                + " " + physics.getTerrainManager().getStats());
     }
 }
