@@ -14,7 +14,16 @@ import kotlin.math.atan
 import kotlin.math.cos
 import kotlin.math.sin
 
+/**
+ * Historical planner only. The live section plan no longer emits these wedges,
+ * so these tests pin the legacy algorithm and its geometry. The live absence is
+ * asserted separately by [TerrainShapePlanTest.livePlanDoesNotInstallAFixedClimbWedge].
+ */
 class TerrainSlopePlannerTest {
+    /** Historical planner only. The live section plan no longer emits these wedges. */
+    private fun legacyPlan(snapshot: SectionSnapshot) =
+        TerrainShapePlan(snapshot.sectionPos, snapshot.revision, emptyList(), TerrainSlopePlanner.build(snapshot))
+
     private val full = listOf(AABB(0.0, 0.0, 0.0, 1.0, 1.0, 1.0))
 
     /**
@@ -44,7 +53,7 @@ class TerrainSlopePlannerTest {
 
     @Test
     fun oneBlockStepOverAClearFlatRunBecomesOneMergedRamp() {
-        val plan = TerrainShapePlan.build(snapshot({ x, _ -> if (x >= 9) 5 else 4 }))
+        val plan = legacyPlan(snapshot({ x, _ -> if (x >= 9) 5 else 4 }))
         assertEquals(1, plan.slopes.size)
         val ramp = plan.slopes.single()
         // Face at x=9, three-block run back to x=6, low surface y=4, high y=5.
@@ -58,12 +67,12 @@ class TerrainSlopePlannerTest {
 
     @Test
     fun tallerStepsAndDiagonalStaircasesKeepOriginalCollision() {
-        assertTrue(TerrainShapePlan.build(snapshot({ x, _ -> if (x >= 9) 6 else 4 })).slopes.isEmpty())
+        assertTrue(legacyPlan(snapshot({ x, _ -> if (x >= 9) 6 else 4 })).slopes.isEmpty())
         // 45-degree staircase: every step is one block, but no flat run exists.
-        assertTrue(TerrainShapePlan.build(snapshot({ x, _ -> minOf(4 + x, 13) })).slopes.isEmpty())
+        assertTrue(legacyPlan(snapshot({ x, _ -> minOf(4 + x, 13) })).slopes.isEmpty())
         // One flat column behind the step is not a run.
         val narrow = snapshot({ x, _ -> when { x >= 9 -> 5; x == 6 -> 3; else -> 4 } })
-        assertTrue(TerrainShapePlan.build(narrow).slopes.isEmpty())
+        assertTrue(legacyPlan(narrow).slopes.isEmpty())
     }
 
     @Test
@@ -78,7 +87,7 @@ class TerrainSlopePlannerTest {
             roof.add(SectionSnapshot.BlockShapeSnapshot(x, 14, z, full, true))
             roof.add(SectionSnapshot.BlockShapeSnapshot(x, 15, z, full, true))
         }
-        val plan = TerrainShapePlan.build(base.copy(blocks = base.blocks + roof))
+        val plan = legacyPlan(base.copy(blocks = base.blocks + roof))
         assertEquals(1, plan.slopes.size, "the shallow floor step under the roof must still get its ramp")
         val ramp = plan.slopes.single()
         assertEquals(-2f, ramp.lowX)
@@ -101,7 +110,7 @@ class TerrainSlopePlannerTest {
                 roof.add(SectionSnapshot.BlockShapeSnapshot(x, y, z, full, true))
             }
         }
-        val plan = TerrainShapePlan.build(base.copy(blocks = base.blocks + roof))
+        val plan = legacyPlan(base.copy(blocks = base.blocks + roof))
         assertEquals(2, plan.slopes.size, "each readable story top step needs its own ramp")
         assertEquals(-4f, plan.slopes[0].lowY)
         assertEquals(-3f, plan.slopes[0].highY)
@@ -115,7 +124,7 @@ class TerrainSlopePlannerTest {
 
     @Test
     fun borderStepUsesReadableMarginAndSkipsUnknownChunks() {
-        val readable = TerrainShapePlan.build(snapshot({ _, _ -> 4 }, margin = { x, _ -> if (x == 16) 4 else null }))
+        val readable = legacyPlan(snapshot({ _, _ -> 4 }, margin = { x, _ -> if (x == 16) 4 else null }))
         val ramp = readable.slopes.singleOrNull()
         assertNotNull(ramp)
         assertEquals(5f, ramp!!.lowX)
@@ -123,7 +132,7 @@ class TerrainSlopePlannerTest {
         assertEquals(-4f, ramp.lowY)
         assertEquals(-3f, ramp.highY)
 
-        val unknown = TerrainShapePlan.build(snapshot({ _, _ -> 4 }))
+        val unknown = legacyPlan(snapshot({ _, _ -> 4 }))
         assertTrue(unknown.slopes.isEmpty(), "an unread neighbour chunk must never be guessed")
     }
 
@@ -136,24 +145,24 @@ class TerrainSlopePlannerTest {
             SectionSnapshot.BlockShapeSnapshot(x, 4, it, listOf(AABB(0.0, 0.0, 0.0, 1.0, .5, 1.0)), false)
         }
         val slabAtLowColumn = base.copy(blocks = base.blocks + slabRow(8))
-        assertTrue(TerrainShapePlan.build(slabAtLowColumn).slopes.isEmpty(),
+        assertTrue(legacyPlan(slabAtLowColumn).slopes.isEmpty(),
             "a fractional surface on the low column must keep the original block collision")
         val slabOnRun = base.copy(blocks = base.blocks + slabRow(6))
-        assertTrue(TerrainShapePlan.build(slabOnRun).slopes.isEmpty(),
+        assertTrue(legacyPlan(slabOnRun).slopes.isEmpty(),
             "a fractional surface on the runway must keep the original block collision")
     }
 
     @Test
     fun holesCliffsAndCeilingsKeepOriginalCollision() {
         // A hole in the runway: one run column drops away, so no ramp.
-        assertTrue(TerrainShapePlan.build(snapshot({ x, _ -> when { x >= 9 -> 5; x == 6 -> 2; else -> 4 } }))
+        assertTrue(legacyPlan(snapshot({ x, _ -> when { x >= 9 -> 5; x == 6 -> 2; else -> 4 } }))
             .slopes.isEmpty())
         // A cliff on the other side is not a one-block step.
-        assertTrue(TerrainShapePlan.build(snapshot({ x, _ -> if (x >= 9) 2 else 4 })).slopes.isEmpty())
+        assertTrue(legacyPlan(snapshot({ x, _ -> if (x >= 9) 2 else 4 })).slopes.isEmpty())
         // A low ceiling over the run (low + 2 occupied) must not be filled in.
         val base = snapshot({ x, _ -> if (x >= 9) 5 else 4 })
         val ceiling = base.copy(blocks = base.blocks + SectionSnapshot.BlockShapeSnapshot(7, 5, 8, full, true))
-        val plan = TerrainShapePlan.build(ceiling)
+        val plan = legacyPlan(ceiling)
         assertEquals(2, plan.slopes.size, "only the column under the ceiling keeps the original collision")
         assertEquals(-4f, plan.slopes[0].lowZ)
         assertEquals(4f, plan.slopes[0].halfWidth)
@@ -166,7 +175,7 @@ class TerrainSlopePlannerTest {
         val base = snapshot({ x, _ -> if (x >= 9) 5 else 4 })
         val blocked = base.copy(blocks = base.blocks + SectionSnapshot.BlockShapeSnapshot(
             7, 4, 3, listOf(AABB(0.0, 0.0, 0.0, 1.0, .5, 1.0)), false))
-        val plan = TerrainShapePlan.build(blocked)
+        val plan = legacyPlan(blocked)
         assertEquals(2, plan.slopes.size)
         assertEquals(-6.5f, plan.slopes[0].lowZ)
         assertEquals(1.5f, plan.slopes[0].halfWidth)
@@ -177,7 +186,7 @@ class TerrainSlopePlannerTest {
     @Test
     fun wedgeCarriesAnAlignedLoadWithoutSliding() {
         NativePhysicsLoader.load()
-        val plan = TerrainShapePlan.build(snapshot({ x, _ -> if (x >= 9) 5 else 4 }))
+        val plan = legacyPlan(snapshot({ x, _ -> if (x >= 9) 5 else 4 }))
         assertEquals(1, plan.slopes.size)
         val space = PhysicsSpace(PhysicsSpace.BroadphaseType.DBVT)
         try {

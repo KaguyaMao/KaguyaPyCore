@@ -8,15 +8,12 @@ object CollisionGroups {
     const val TRIGGER = 1 shl 3
     const val CHASSIS = 1 shl 4
     const val WHEEL = 1 shl 5
-    /** Individual articulated track shoes.  Kept separate from WHEEL so
+    /** Individual articulated track links. Kept separate from WHEEL so
      * same-owner link-link pairs can be filtered while links still collide
      * with the chassis, wheels and terrain. */
     const val TRACK_LINK = 1 shl 6
-    /** Vehicle-only slope ramps for climbable one-block height differences.
-     * Only bodies that explicitly ask for SLOPE collide with them; every other
-     * object keeps colliding with the original block boxes. */
-    const val SLOPE = 1 shl 7
-    /** Terrain group mask for drivable ground: block boxes plus slope ramps. */
-    const val DRIVABLE = TERRAIN or SLOPE
+    /** Terrain group mask for drivable ground. Terrain collision is exactly the
+     * Minecraft block collision geometry; there are no generated wedges. */
+    const val DRIVABLE = TERRAIN
     const val ALL = -1
 }

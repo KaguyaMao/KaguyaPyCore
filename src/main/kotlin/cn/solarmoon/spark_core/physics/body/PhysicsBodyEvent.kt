@@ -19,6 +19,18 @@ sealed interface PhysicsBodyEvent {
         val otherPoint: ManifoldPoint,
         val snapshot: ContactSnapshot
     ) : PhysicsBodyEvent
+    /**
+     * A contact point is about to enter the manifold.
+     *
+     * Unlike [Contact], this fires before the point exists, so per-point
+     * friction and tangential motion apply to the same substep's solver.
+     */
+    data class ConceivedContact(
+        val self: PhysicsCollisionObject,
+        val other: PhysicsCollisionObject,
+        val selfPoint: ManifoldPoint,
+        val otherPoint: ManifoldPoint
+    ) : PhysicsBodyEvent
     /** Contact response sampled after Bullet has solved the current substep. */
     data class ResolvedContact(
         val self: PhysicsCollisionObject,

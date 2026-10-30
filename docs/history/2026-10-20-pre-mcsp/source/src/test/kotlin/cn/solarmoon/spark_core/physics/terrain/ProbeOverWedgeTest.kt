@@ -62,7 +62,7 @@ class ProbeOverWedgeTest {
     @Test
     fun everyBeltProbeKeepsLoadWhileTheNoseRidesTheClimbWedge() {
         NativePhysicsLoader.load()
-        val plan = TerrainShapePlan.build(snapshot())
+        val plan = TerrainShapePlan(SectionPos.of(0, 0, 0), 1, emptyList(), TerrainSlopePlanner.build(snapshot()))
         assertTrue(plan.slopes.isNotEmpty(), "the authored step must produce a climb wedge")
 
         val space = space()

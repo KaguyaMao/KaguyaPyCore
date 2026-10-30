@@ -2,9 +2,9 @@
 
 ## 版本与制品
 
-- Java wrapper：`com.github.stephengold:Libbulletjme-Windows64:22.0.3` 的主 JAR。不同平台主 JAR 的 Java 类相同；名称不代表运行时只能用于 Windows。
-- Linux 原生：`Libbulletjme-Linux64:22.0.3:SpMtRelease`。
-- Windows 原生：`Libbulletjme-Windows64:22.0.3:SpMtRelease`。
+- Java wrapper：`com.github.stephengold:Libbulletjme-Windows64:23.2.0` 的主 JAR。不同平台主 JAR 的 Java 类相同；名称不代表运行时只能用于 Windows。
+- Linux 原生：`Libbulletjme-Linux64:23.2.0:SpMtRelease`。
+- Windows 原生：`Libbulletjme-Windows64:23.2.0:SpMtRelease`。
 
 `SpMtRelease` 是线程安全构建。加载后还会用 `NativeLibrary.isThreadSafe()` 验证，避免误把单线程 native 放入每 Level 多线程环境。
 
@@ -29,12 +29,12 @@ natives/windows/x86_64/bulletjme.dll
 4. 释放到系统临时目录下的版本/哈希隔离目录；
 5. 原子替换损坏或不完整的缓存文件；
 6. 使用绝对路径 `System.load`；
-7. 校验 native 版本 `22.0.3` 和线程安全标记。
+7. 校验 native 版本 `23.2.0` 和线程安全标记。
 
 当前哈希：
 
-- Linux：`675cf1a488f07a42fdabb6d72a7ff529e37b90ef687a4809a2d99d6f077d5b63`
-- Windows：`ff91c048b18c2c31bc80616d9294940cf8130a2622b7323b7950e632ca9ac0b1`
+- Linux：`578b360d15c6e863f94f6744affaa37dc6f6f55b0eb1c75e5a35a85886a38a1d`
+- Windows：`433d860e80c324c106570f5da76c2c15b43184a075074097bd6e21096147b27a`
 
 替换上游版本时必须同时更新 wrapper、两平台 native、版本常量、哈希、JUnit 和 GameTest，不能只改 Maven 版本号。
 

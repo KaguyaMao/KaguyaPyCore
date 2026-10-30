@@ -85,6 +85,12 @@ object PhysicsLevelEvents {
         val physics = SparkPhysics.get(event.level)
         physics.untrackEntity(event.entity)
         physics.removeAttachedBodies(event.entity)
-        SparkPhysics.host(event.entity).allPhysicsBodies.values.toList().forEach(physics::removeBody)
+        // Only the kinematic proxy this listener created. A vehicle host also
+        // owns wheels, runs and joints that must be torn down in dependency
+        // order by their runtime; sweeping every owner body here would remove
+        // those bodies while their joints are still live.
+        // Use the map the entity mixin actually implements. The Kotlin default
+        // method on PhysicsHost is not a reliable call target after reobf.
+        SparkPhysics.host(event.entity).allPhysicsBodies["body"]?.let(physics::removeBody)
     }
 }

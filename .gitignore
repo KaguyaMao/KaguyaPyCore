@@ -6,3 +6,9 @@ run-data/
 logs/
 out/
 *.iml
+
+# Kotlin incremental build state produced by the Gradle plugin.
+.kotlin/
+
+# Rebuildable local physics MCP index. Source of truth stays in the consumer repository.
+.local/physics-mcp/

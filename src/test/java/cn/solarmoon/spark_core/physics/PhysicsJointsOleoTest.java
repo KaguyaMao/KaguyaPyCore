@@ -31,7 +31,7 @@ class PhysicsJointsOleoTest {
                     new Matrix3f(), new Matrix3f(),
                     -0.3f, 0.22f);
             space.addJoint(axle);
-            PhysicsJoints.applyOleoForce(
+            PhysicsJoints.applyPairedForce(
                     chassis, wheel,
                     new Vector3f(0f, 1f, 0f),
                     2000f,

@@ -16,7 +16,7 @@ import static org.junit.jupiter.api.Assertions.*;
  * 锁定历史 wheelSuspension 包装接口的钳制行为，不推断底层物理单位。
  *
  * 包装器将 damping 钳制在 [0,1] 仅是兼容策略，读回 1.0 不能证明临界阻尼。
- * Libbulletjme 22.0.3 所带 Spring2 原生求解使用 N·s/m 系数；真正的动力学
+ * Libbulletjme 23.2.0 所带 Spring2 原生求解使用 N·s/m 系数；真正的动力学
  * 单位回归见 NativeSpringDampingTest。这里不改变旧调用的运行行为。
  */
 class PhysicsJointsDampingSemanticsTest {

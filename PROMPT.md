@@ -1,10 +1,14 @@
 # 可复用开发 Prompt
 
-你正在维护 `/home/shu/Java/Projects/KaguyaPyCore`，这是从 `/home/shu/IdeaProjects/Spark-Core-1201-1.21.1-neoforge` 独立迁移出的 Forge 1.20.1 Spark Core，模组 ID 必须保持 `spark_core`。
+你正在维护当前检出的 KaguyaPyCore 仓库。它是从历史路径
+`/home/shu/IdeaProjects/Spark-Core-1201-1.21.1-neoforge` 独立迁移出的 Forge 1.20.1
+Spark Core，模组 ID 必须保持 `spark_core`。历史机器路径只说明来源，不是当前工作目录。
 
-先完整阅读 `README.md`、`plan.md`、`docs/ARCHITECTURE.md`、`docs/THREADING_AND_LIFECYCLE.md`、`docs/TERRAIN_COLLISION.md`、`docs/PHYSICS_API.md` 和 `docs/TESTING.md`，再修改代码。
+先完整阅读 `README.md`、`plan.md`、`docs/CORE_SCOPE.md`、`docs/ARCHITECTURE.md`、`docs/THREADING_AND_LIFECYCLE.md`、`docs/TERRAIN_COLLISION.md`、`docs/PHYSICS_API.md`、`docs/TRACK_RUN_API.md`、`docs/PHYSICS_INTERPOLATION.md`、`docs/TRACKED_VEHICLE_SUPPORT.md`、`docs/MCP_INTEGRATION.md` 和 `docs/TESTING.md`，再修改代码。若任务来自 SuperbWarfare 履带物理，还要阅读 SuperbWarfare 仓库内 `docs/physics/CONSTRAINTS.md`、`docs/physics/ARCHITECTURE.md` 和 `docs/physics/MCP_OPERATIONS.md`。跨仓库引用写成 `SuperbWarfare:docs/physics/...`。
 
-固定技术基线：Minecraft 1.20.1、Forge 47.4.22、ForgeGradle 6、Java 17、Kotlin 2.0.0、Kotlin for Forge 4.11.0、Libbulletjme 22.0.3。首版原生平台仅 Windows/Linux x86_64，必须使用 `SpMtRelease`。不要加入 NeoForge API、Electrostatic4j、JSnapLoader 或物理前置模组。
+核心库只提供通用 Bullet 能力：物理线程、body/shape/joint 生命周期、通用 `TrackRun`、不可变快照和插值、普通 Minecraft voxel/AABB 地形。不要在核心库实现车辆高度场、`LocalHeightField`、`TerrainSupportField`、`SUPPORT_PAIR`、楔面、台阶辅助、车型驱动或履带渲染；这些属于 SuperbWarfare。
+
+固定技术基线：Minecraft 1.20.1、Forge 47.4.22、ForgeGradle 6、Java 17、Kotlin 2.0.0、Kotlin for Forge 4.11.0、Libbulletjme 23.2.0。首版原生平台仅 Windows/Linux x86_64，必须使用 `SpMtRelease`。不要加入 NeoForge API、Electrostatic4j、JSnapLoader 或物理前置模组。
 
 线程规则不可破坏：
 
