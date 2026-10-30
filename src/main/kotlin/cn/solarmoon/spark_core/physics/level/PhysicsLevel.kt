@@ -18,6 +18,7 @@ import cn.solarmoon.spark_core.util.Subscription
 import cn.solarmoon.spark_core.util.TaskSubmitOffice
 import com.jme3.bullet.PhysicsSpace
 import com.jme3.bullet.PhysicsTickListener
+import com.jme3.bullet.StepFlag
 import com.jme3.bullet.collision.PhysicsCollisionObject
 import com.jme3.bullet.collision.PhysicsRayTestResult
 import com.jme3.bullet.collision.shapes.BoxCollisionShape
@@ -75,6 +76,10 @@ open class PhysicsLevel(
     private val restartCount = AtomicInteger(0)
     private val physicsTick = AtomicLong(0)
     private val droppedFrames = AtomicLong(0)
+    /** Main-thread terrain scheduling cost accumulated across rejected frame requests. */
+    private val pendingTerrainRequestNanos = AtomicLong(0)
+    private val pendingTerrainRequestCalls = AtomicInteger(0)
+    private val pendingDroppedFrameRequests = AtomicInteger(0)
     /** Changes when the native world is recreated; interpolation must not cross it. */
     private val worldEpoch = AtomicLong(0)
     private val trackedEntities = ConcurrentHashMap.newKeySet<Entity>()
@@ -88,9 +93,16 @@ open class PhysicsLevel(
      * logged and never abort the step.
      */
     private val postStepListeners = CopyOnWriteArrayList<() -> Unit>()
-    /** Run once when this level starts shutting down or fails, before native teardown. */
-    private val closeListeners = CopyOnWriteArrayList<() -> Unit>()
+    /**
+     * Ordered native cleanup. Runs on the physics thread after admission stops
+     * and before close listeners and [teardownNative].
+     */
+    private val shutdownParticipants = CopyOnWriteArrayList<() -> Unit>()
+    private val shutdownParticipantsRan = AtomicBoolean(false)
+    private val shutdownParticipantLock = Any()
     private val frameRef = AtomicReference(PhysicsFrameSnapshot.EMPTY)
+    /** Only read or written by [physicsThread] while a frame is executing. */
+    private var activeStepTiming: StepTimingAccumulator? = null
     /** Scratch state is confined to [physicsThread]. */
     private val terrainRayResults = ArrayList<PhysicsRayTestResult>(8)
     private val terrainRayFrom = Vector3f()
@@ -213,26 +225,44 @@ open class PhysicsLevel(
 
     fun requestStep() {
         if (!isAcceptingTasks() || !::world.isInitialized) return
+        val terrainStarted = System.nanoTime()
         terrainManager.tickMainThread(latestFrame.terrainActivationBoxes)
-        val poses = requestEntities().associateWith { entity ->
-            val box = entity.boundingBox
-            EntityPose(
-                box.center,
-                Vector3f(
-                    (box.xsize / 2).toFloat().coerceAtLeast(.01f),
-                    (box.ysize / 2).toFloat().coerceAtLeast(.01f),
-                    (box.zsize / 2).toFloat().coerceAtLeast(.01f)
-                )
-            )
-        }
+        val requestTerrainNanos = System.nanoTime() - terrainStarted
+        pendingTerrainRequestNanos.addAndGet(requestTerrainNanos)
+        pendingTerrainRequestCalls.incrementAndGet()
         if (!stepQueued.compareAndSet(false, true)) {
             droppedFrames.incrementAndGet()
+            pendingDroppedFrameRequests.incrementAndGet()
             return
         }
+        val accumulatedTerrainRequestNanos = pendingTerrainRequestNanos.getAndSet(0)
+        val accumulatedTerrainRequestCalls = pendingTerrainRequestCalls.getAndSet(0)
+        val accumulatedDroppedFrameRequests = pendingDroppedFrameRequests.getAndSet(0)
         try {
+            val poseCaptureStarted = System.nanoTime()
+            val poses = requestEntities().associateWith { entity ->
+                val box = entity.boundingBox
+                EntityPose(
+                    box.center,
+                    Vector3f(
+                        (box.xsize / 2).toFloat().coerceAtLeast(.01f),
+                        (box.ysize / 2).toFloat().coerceAtLeast(.01f),
+                        (box.zsize / 2).toFloat().coerceAtLeast(.01f)
+                    )
+                )
+            }
+            val requestPoseCaptureNanos = System.nanoTime() - poseCaptureStarted
+            val submittedAt = System.nanoTime()
             executor.submit {
                 try {
-                    performStep(poses)
+                    performStep(
+                        poses,
+                        accumulatedTerrainRequestNanos,
+                        accumulatedTerrainRequestCalls,
+                        requestPoseCaptureNanos,
+                        accumulatedDroppedFrameRequests,
+                        System.nanoTime() - submittedAt,
+                    )
                 } catch (error: Throwable) {
                     recover(error)
                 } finally {
@@ -242,51 +272,102 @@ open class PhysicsLevel(
         } catch (error: RejectedExecutionException) {
             stepQueued.set(false)
             droppedFrames.incrementAndGet()
+            pendingTerrainRequestNanos.addAndGet(accumulatedTerrainRequestNanos)
+            pendingTerrainRequestCalls.addAndGet(accumulatedTerrainRequestCalls)
+            pendingDroppedFrameRequests.addAndGet(accumulatedDroppedFrameRequests + 1)
+        } catch (error: Throwable) {
+            stepQueued.set(false)
+            throw error
         }
     }
 
-    private fun performStep(poses: Map<Entity, EntityPose>) {
+    private fun performStep(
+        poses: Map<Entity, EntityPose>,
+        requestTerrainNanos: Long,
+        requestTerrainCalls: Int,
+        requestPoseCaptureNanos: Long,
+        droppedFrameRequests: Int,
+        requestQueueWaitNanos: Long,
+    ) {
         assertPhysicsThread()
         if (!isAcceptingTasks()) return
         val started = System.nanoTime()
-        processTasks(PPhase.FRAME_PRE)
-        processTasks(PPhase.ALL)
-        // A task may have requested shutdown; never touch a torn-down world.
-        if (!isAcceptingTasks()) return
-        applyAttachedEntityPoses(poses)
-        terrainManager.physicsTick(world)
-
-        repeat(SUBSTEPS_PER_MC_TICK) {
-            if (!isAcceptingTasks()) return
-            physicsTick.incrementAndGet()
-            world.update(1f / TPS, 0, false, true, false)
-        }
-
-        val bodies = LinkedHashMap<PhysicsCollisionObject, BodyFrame>()
-        val byId = LinkedHashMap<Long, BodyFrame>(bodies.size.coerceAtLeast(16))
-        val activation = ArrayList<net.minecraft.world.phys.AABB>()
-        world.pcoList.forEach { body ->
-            val frame = body.captureFrame()
-            bodies[body] = frame
-            byId[frame.bodyId] = frame
-            val requestsTerrain = body.collideWithGroups and CollisionGroups.DRIVABLE != 0 ||
-                body.collisionGroup and CollisionGroups.CHASSIS != 0
-            if ((!body.isStatic || (body is PhysicsRigidBody && body.isKinematic)) && requestsTerrain) {
-                activation.add(frame.boundingBox.expandTowards(frame.linearVelocity.scale(0.5)))
-            }
-        }
-        val completed = System.nanoTime()
-        frameRef.set(
-            PhysicsFrameSnapshot(
-                physicsTick.get(),
-                bodies,
-                activation,
-                completed - started,
-                completed,
-                byId,
-                worldEpoch.get(),
-            )
+        val timing = StepTimingAccumulator(
+            requestTerrainNanos,
+            requestTerrainCalls,
+            requestPoseCaptureNanos,
+            droppedFrameRequests,
+            requestQueueWaitNanos,
         )
+        activeStepTiming = timing
+        try {
+            val taskStarted = System.nanoTime()
+            processTasks(PPhase.FRAME_PRE)
+            processTasks(PPhase.ALL)
+            timing.taskNanos = System.nanoTime() - taskStarted
+            // A task may have requested shutdown; never touch a torn-down world.
+            if (!isAcceptingTasks()) return
+            val attachedStarted = System.nanoTime()
+            applyAttachedEntityPoses(poses)
+            timing.attachedPoseNanos = System.nanoTime() - attachedStarted
+            val terrainStarted = System.nanoTime()
+            terrainManager.physicsTick(world)
+            timing.terrainApplyNanos = System.nanoTime() - terrainStarted
+
+            val bulletStarted = System.nanoTime()
+            repeat(SUBSTEPS_PER_MC_TICK) {
+                if (!isAcceptingTasks()) return
+                physicsTick.incrementAndGet()
+                // contactConceived must be requested explicitly: without it Bullet
+                // never calls onContactConceived and a new belt contact would reach
+                // the solver without a tangential target on its first substep.
+                world.update(
+                    1f / TPS,
+                    0,
+                    StepFlag.contactProcessed or StepFlag.contactConceived,
+                )
+                timing.substepCount++
+            }
+            timing.bulletUpdateNanos = System.nanoTime() - bulletStarted
+
+            val captureStarted = System.nanoTime()
+            val bodyCapacity = world.pcoList.size
+            val bodies = LinkedHashMap<PhysicsCollisionObject, BodyFrame>(bodyCapacity)
+            val byId = LinkedHashMap<Long, BodyFrame>(bodyCapacity)
+            val activation = ArrayList<net.minecraft.world.phys.AABB>(bodyCapacity.coerceAtMost(64))
+            world.pcoList.forEach { body ->
+                val frame = body.captureFrame()
+                bodies[body] = frame
+                byId[frame.bodyId] = frame
+                timing.bodyCount++
+                if (body is PhysicsRigidBody && body.isDynamic) timing.dynamicBodyCount++
+                if (body.isStatic) timing.staticBodyCount++
+                if (body is PhysicsRigidBody && body.isKinematic) timing.kinematicBodyCount++
+                if (body.collisionGroup and CollisionGroups.TERRAIN != 0) timing.terrainBodyCount++
+                val requestsTerrain = body.collideWithGroups and CollisionGroups.DRIVABLE != 0 ||
+                    body.collisionGroup and CollisionGroups.CHASSIS != 0
+                if ((!body.isStatic || (body is PhysicsRigidBody && body.isKinematic)) && requestsTerrain) {
+                    activation.add(frame.boundingBox.expandTowards(frame.linearVelocity.scale(0.5)))
+                }
+            }
+            timing.activationBoxCount = activation.size
+            timing.bodyCaptureNanos = System.nanoTime() - captureStarted
+            val completed = System.nanoTime()
+            frameRef.set(
+                PhysicsFrameSnapshot(
+                    physicsTick.get(),
+                    bodies,
+                    activation,
+                    completed - started,
+                    completed,
+                    byId,
+                    worldEpoch.get(),
+                    timing.toImmutable(),
+                )
+            )
+        } finally {
+            activeStepTiming = null
+        }
     }
 
     private fun applyAttachedEntityPoses(poses: Map<Entity, EntityPose>) {
@@ -480,30 +561,95 @@ open class PhysicsLevel(
     }
 
     override fun prePhysicsTick(space: PhysicsSpace, timeStep: Float) {
-        world.pcoList.forEach { body ->
-            body.isColliding = false
-            body.triggerBodyEvent(PhysicsBodyEvent.Tick)
-            body.triggerBodyEvent(PhysicsBodyEvent.PhysicsTick.Pre)
+        val timing = activeStepTiming
+        val started = if (timing == null) 0L else System.nanoTime()
+        try {
+            world.pcoList.forEach { body ->
+                body.isColliding = false
+                body.triggerBodyEvent(PhysicsBodyEvent.Tick)
+                body.triggerBodyEvent(PhysicsBodyEvent.PhysicsTick.Pre)
+                if (timing != null) timing.preCallbackBodyVisits++
+            }
+            processTasks(PPhase.ALL)
+            processTasks(PPhase.PRE)
+            MinecraftForge.EVENT_BUS.post(PhysicsLevelTickEvent.Pre(this))
+            requestEntities().forEach { MinecraftForge.EVENT_BUS.post(PhysicsEntityTickEvent(it)) }
+        } finally {
+            if (timing != null) timing.preCallbackNanos += System.nanoTime() - started
         }
-        processTasks(PPhase.ALL)
-        processTasks(PPhase.PRE)
-        MinecraftForge.EVENT_BUS.post(PhysicsLevelTickEvent.Pre(this))
-        requestEntities().forEach { MinecraftForge.EVENT_BUS.post(PhysicsEntityTickEvent(it)) }
     }
 
     override fun physicsTick(space: PhysicsSpace, timeStep: Float) {
-        world.dispatchResolvedContacts()
-        world.pcoList.forEach { it.triggerBodyEvent(PhysicsBodyEvent.PhysicsTick.Post) }
-        processTasks(PPhase.ALL)
-        processTasks(PPhase.POST)
-        MinecraftForge.EVENT_BUS.post(PhysicsLevelTickEvent.Post(this))
-        postStepListeners.forEach { listener ->
-            try {
-                listener()
-            } catch (error: Throwable) {
-                SparkCore.LOGGER.error("{} post-step listener failed", name, error)
+        val timing = activeStepTiming
+        val started = if (timing == null) 0L else System.nanoTime()
+        try {
+            world.dispatchResolvedContacts()
+            world.pcoList.forEach {
+                it.triggerBodyEvent(PhysicsBodyEvent.PhysicsTick.Post)
+                if (timing != null) timing.postCallbackBodyVisits++
             }
+            processTasks(PPhase.ALL)
+            processTasks(PPhase.POST)
+            MinecraftForge.EVENT_BUS.post(PhysicsLevelTickEvent.Post(this))
+            postStepListeners.forEach { listener ->
+                try {
+                    listener()
+                } catch (error: Throwable) {
+                    SparkCore.LOGGER.error("{} post-step listener failed", name, error)
+                }
+            }
+        } finally {
+            if (timing != null) timing.postCallbackNanos += System.nanoTime() - started
         }
+    }
+
+    private class StepTimingAccumulator(
+        private val requestTerrainNanos: Long,
+        private val requestTerrainCalls: Int,
+        private val requestPoseCaptureNanos: Long,
+        private val droppedFrameRequests: Int,
+        private val requestQueueWaitNanos: Long,
+    ) {
+        var taskNanos = 0L
+        var attachedPoseNanos = 0L
+        var terrainApplyNanos = 0L
+        var bulletUpdateNanos = 0L
+        var preCallbackNanos = 0L
+        var postCallbackNanos = 0L
+        var bodyCaptureNanos = 0L
+        var substepCount = 0
+        var bodyCount = 0
+        var dynamicBodyCount = 0
+        var staticBodyCount = 0
+        var kinematicBodyCount = 0
+        var terrainBodyCount = 0
+        var activationBoxCount = 0
+        var preCallbackBodyVisits = 0L
+        var postCallbackBodyVisits = 0L
+
+        fun toImmutable() = PhysicsStepMetrics(
+            requestTerrainNanos = requestTerrainNanos,
+            requestTerrainCalls = requestTerrainCalls,
+            requestPoseCaptureNanos = requestPoseCaptureNanos,
+            droppedFrameRequests = droppedFrameRequests,
+            requestQueueWaitNanos = requestQueueWaitNanos,
+            taskNanos = taskNanos,
+            attachedPoseNanos = attachedPoseNanos,
+            terrainApplyNanos = terrainApplyNanos,
+            bulletUpdateNanos = bulletUpdateNanos,
+            preCallbackNanos = preCallbackNanos,
+            postCallbackNanos = postCallbackNanos,
+            bodyCaptureNanos = bodyCaptureNanos,
+            substepCount = substepCount,
+            bodyCount = bodyCount,
+            dynamicBodyCount = dynamicBodyCount,
+            staticBodyCount = staticBodyCount,
+            kinematicBodyCount = kinematicBodyCount,
+            terrainBodyCount = terrainBodyCount,
+            activationBoxCount = activationBoxCount,
+            preCallbackBodyVisits = preCallbackBodyVisits,
+            postCallbackBodyVisits = postCallbackBodyVisits,
+        )
     }
 
     private fun recover(error: Throwable) {
@@ -573,11 +719,61 @@ open class PhysicsLevel(
      * runs before native bodies and joints are destroyed, so listeners must
      * only release references and complete pending futures.
      *
+     * Ordered native cleanup belongs in [addShutdownParticipant], which runs
+     * earlier and may call [removeBody] / [removeJoint]. A close listener must
+     * not create objects or submit tasks.
+     *
      * Registration is atomic with the shutdown transition: a listener added
      * after shutdown started is invoked immediately instead of being stored, so
      * a runtime constructed during teardown still observes the close.
      */
-    internal fun addCloseListener(listener: () -> Unit): Subscription = lifecycle.addCloseListener(listener)
+    fun addCloseListener(listener: () -> Unit): Subscription = lifecycle.addCloseListener(listener)
+
+    /**
+     * Register ordered cleanup for level shutdown.
+     *
+     * The participant runs on the physics thread after this level has stopped
+     * accepting tasks and before close listeners and native teardown. It may
+     * call [removeBody] and [removeJoint] directly. It must not call
+     * [submitTask] or [submitImmediateTask]: those are already rejected. It
+     * must not block. A thrown exception fails the close instead of being
+     * reported as a successful teardown.
+     *
+     * Register this while the level is still accepting work. A participant
+     * added after this phase has already run is not stored.
+     */
+    fun addShutdownParticipant(participant: () -> Unit): Subscription {
+        synchronized(shutdownParticipantLock) {
+            if (shutdownParticipantsRan.get()) return Subscription {}
+            shutdownParticipants.add(participant)
+        }
+        return Subscription {
+            synchronized(shutdownParticipantLock) { shutdownParticipants.remove(participant) }
+        }
+    }
+
+    private fun runShutdownParticipants() {
+        val participants = synchronized(shutdownParticipantLock) {
+            if (!shutdownParticipantsRan.compareAndSet(false, true)) return
+            val copy = shutdownParticipants.toList()
+            shutdownParticipants.clear()
+            copy
+        }
+        val failures = ArrayList<Throwable>()
+        for (participant in participants) {
+            try {
+                participant()
+            } catch (error: Throwable) {
+                SparkCore.LOGGER.error("{} shutdown participant failed", name, error)
+                failures += error
+            }
+        }
+        if (failures.isNotEmpty()) {
+            val primary = failures.first()
+            failures.drop(1).forEach { primary.addSuppressed(it) }
+            throw primary
+        }
+    }
 
     private fun notifyCloseListeners() = lifecycle.notifyCloseListeners()
 
@@ -620,18 +816,27 @@ open class PhysicsLevel(
                     "PhysicsLevel '$name' cleanup ran off the physics thread",
                 )
             } else {
-                notifyCloseListeners()
-                if (::world.isInitialized) {
-                    // Queued tasks may touch native objects, so they only run
-                    // when the world actually exists. A level that failed
-                    // before creating its world must fail them instead.
-                    drainTasks()
-                } else {
-                    immediateTasks.clear()
-                    deduplicatedTasks.clear()
+                // A participant failure must not skip native teardown. The close
+                // future still fails, so the caller cannot treat it as success.
+                try {
+                    runShutdownParticipants()
+                    notifyCloseListeners()
+                    if (::world.isInitialized) {
+                        drainTasks()
+                    } else {
+                        immediateTasks.clear()
+                        deduplicatedTasks.clear()
+                    }
+                    lifecycle.failRemainingTasks()
+                } catch (error: Throwable) {
+                    cleanupError = error
+                    SparkCore.LOGGER.error("{} shutdown participant or drain failed", name, error)
                 }
-                lifecycle.failRemainingTasks()
-                teardownNative()
+                try {
+                    teardownNative()
+                } catch (error: Throwable) {
+                    if (cleanupError == null) cleanupError = error else cleanupError.addSuppressed(error)
+                }
             }
         } catch (error: Throwable) {
             cleanupError = error

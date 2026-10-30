@@ -28,7 +28,7 @@ import com.jme3.math.Vector3f
  * each object as soon as it exists and roll the partial assembly back when a
  * later step throws.
  */
-internal object TrackRunAssembly {
+object TrackRunAssembly {
     /**
      * Create one link body. [bodyName] must be unique within the owning host,
      * otherwise the host's name map would silently replace an earlier body.

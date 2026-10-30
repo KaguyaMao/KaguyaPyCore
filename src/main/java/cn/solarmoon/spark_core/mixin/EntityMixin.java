@@ -35,6 +35,11 @@ public abstract class EntityMixin implements EntityPatch {
         return sparkCore$physicsBodies;
     }
 
+    @Override
+    public PhysicsCollisionObject getPhysicsBody(String name) {
+        return sparkCore$physicsBodies.get(name);
+    }
+
     @Inject(method = "setPosRaw", at = @At("TAIL"))
     private void sparkCore$syncPhysicsLocation(double x, double y, double z, CallbackInfo ci) {
         if ((Object) this instanceof CollisionObjectEntity entity) {

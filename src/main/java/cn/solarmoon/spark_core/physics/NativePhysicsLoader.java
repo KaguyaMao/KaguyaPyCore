@@ -13,9 +13,9 @@ import java.security.NoSuchAlgorithmException;
 import java.util.HexFormat;
 
 public final class NativePhysicsLoader {
-    public static final String VERSION = "22.0.3";
-    private static final String LINUX_SHA256 = "675cf1a488f07a42fdabb6d72a7ff529e37b90ef687a4809a2d99d6f077d5b63";
-    private static final String WINDOWS_SHA256 = "ff91c048b18c2c31bc80616d9294940cf8130a2622b7323b7950e632ca9ac0b1";
+    public static final String VERSION = "23.2.0";
+    private static final String LINUX_SHA256 = "578b360d15c6e863f94f6744affaa37dc6f6f55b0eb1c75e5a35a85886a38a1d";
+    private static final String WINDOWS_SHA256 = "433d860e80c324c106570f5da76c2c15b43184a075074097bd6e21096147b27a";
     private static boolean loaded;
 
     private NativePhysicsLoader() {

@@ -10,7 +10,7 @@
 | 方块失效 | ServerLevel 注入 | 1.20.1 `onBlockStateChange` Mixin | 已迁移 |
 | 网络 | 1.21 payload API | Forge `SimpleChannel` | 已迁移 |
 | 原生加载 | 原项目打包的 native/loader | 自校验释放器，无 JSnapLoader | 已迁移 |
-| Libbullet wrapper | 原项目内置修改版源码 | 官方 22.0.3 wrapper + Spark 元数据扩展 | 已迁移，源兼容优先 |
+| Libbullet wrapper | 原项目内置修改版源码 | 官方 23.2.0 wrapper + Spark 元数据扩展 | 已迁移，源兼容优先 |
 | 异步世界 | `PhysicsLevel` | 每 Level 单线程 executor | 已迁移 |
 | 地形形状 | chunk/section pipeline | snapshot/plan/native 三阶段 | 已迁移 |
 | 刚体实体 | `CollisionObjectEntity` / `RigidBodyEntity` | 1.20.1 synched data、NBT、快照 | 已迁移 |

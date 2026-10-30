@@ -29,7 +29,22 @@ class PhysicsFrameSnapshot(
     val completedAtNanos: Long,
     bodiesById: Map<Long, BodyFrame> = emptyMap(),
     val epoch: Long = 0L,
+    val metrics: PhysicsStepMetrics = PhysicsStepMetrics.EMPTY,
 ) {
+    /** Preserve the pre-metrics JVM constructor for already compiled consumers. */
+    constructor(
+        tick: Long,
+        bodies: Map<PhysicsCollisionObject, BodyFrame>,
+        terrainActivationBoxes: List<AABB>,
+        stepNanos: Long,
+        completedAtNanos: Long,
+        bodiesById: Map<Long, BodyFrame>,
+        epoch: Long,
+    ) : this(
+        tick, bodies, terrainActivationBoxes, stepNanos, completedAtNanos,
+        bodiesById, epoch, PhysicsStepMetrics.EMPTY,
+    )
+
     val bodies: Map<PhysicsCollisionObject, BodyFrame> =
         Collections.unmodifiableMap(LinkedHashMap(bodies))
 
@@ -44,7 +59,7 @@ class PhysicsFrameSnapshot(
 
     /** Copy with a replaced stable-id view, preserving every other field. */
     fun withBodiesById(replaced: Map<Long, BodyFrame>): PhysicsFrameSnapshot =
-        PhysicsFrameSnapshot(tick, bodies, terrainActivationBoxes, stepNanos, completedAtNanos, replaced, epoch)
+        PhysicsFrameSnapshot(tick, bodies, terrainActivationBoxes, stepNanos, completedAtNanos, replaced, epoch, metrics)
 
     override fun equals(other: Any?): Boolean {
         if (this === other) return true
@@ -53,6 +68,7 @@ class PhysicsFrameSnapshot(
             epoch == other.epoch &&
             stepNanos == other.stepNanos &&
             completedAtNanos == other.completedAtNanos &&
+            metrics == other.metrics &&
             bodies == other.bodies &&
             terrainActivationBoxes == other.terrainActivationBoxes &&
             bodiesById == other.bodiesById
@@ -63,6 +79,7 @@ class PhysicsFrameSnapshot(
         result = 31 * result + epoch.hashCode()
         result = 31 * result + stepNanos.hashCode()
         result = 31 * result + completedAtNanos.hashCode()
+        result = 31 * result + metrics.hashCode()
         result = 31 * result + bodies.hashCode()
         result = 31 * result + terrainActivationBoxes.hashCode()
         result = 31 * result + bodiesById.hashCode()

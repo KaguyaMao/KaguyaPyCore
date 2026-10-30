@@ -308,6 +308,36 @@ class TrackRunRuntime @JvmOverloads constructor(
     }
 
     /**
+     * Same pose write as [reset], but only when the caller is already the
+     * physics thread. A vehicle reset uses this so it does not queue another
+     * task behind itself and deadlock on [CompletableFuture.join].
+     */
+    fun resetNow(poses: List<TrackRunLinkFrame>) {
+        level.assertPhysicsThread()
+        if (poses.size != spec.links.size) {
+            throw IllegalArgumentException("reset needs ${spec.links.size} poses, got ${poses.size}")
+        }
+        if (poses.any { !it.finite() || !it.isRepresentableInBullet() }) {
+            throw IllegalArgumentException("reset pose is not finite or not representable")
+        }
+        val links = linksView
+        if (links.size != poses.size) {
+            throw IllegalStateException("TrackRunRuntime '${spec.name}' has no complete assembly")
+        }
+        links.forEachIndexed { index, body ->
+            val pose = poses[index]
+            body.clearForces()
+            body.setPhysicsLocation(pose.position.toBullet())
+            body.setPhysicsRotation(jmeQuaternion(pose.rotation))
+            body.setLinearVelocity(pose.linearVelocity.toBullet())
+            body.setAngularVelocity(pose.angularVelocity.toBullet())
+            body.activate(true)
+        }
+        poseEpoch.incrementAndGet()
+        publish()
+    }
+
+    /**
      * Apply one torque impulse to a link. [axis] is a world-space direction and
      * [magnitude] is in N*m*s.
      *
@@ -552,12 +582,43 @@ class TrackRunRuntime @JvmOverloads constructor(
     }
 
     /**
+     * Remove this run on the physics thread without submitting another task.
+     *
+     * A shutdown participant calls this after admission has stopped. Success
+     * means the native objects were removed here, not that the level might
+     * remove them later.
+     */
+    fun closeNow() {
+        level.assertPhysicsThread()
+        synchronized(lock) {
+            if (stateRef.get() == State.CLOSED && linksView.isEmpty() && jointsView.isEmpty() && residualLedger == null) {
+                closeFuture.get()?.let { if (!it.isDone) it.complete(null) }
+                return
+            }
+            stateRef.set(State.CLOSING)
+        }
+        try {
+            removeNative(force = true)
+            residualLedger = null
+            markClosedAndClear()
+            closeFuture.get()?.let { if (!it.isDone) it.complete(null) }
+        } catch (error: Throwable) {
+            markClosedAndClear(error, clearAssembly = false)
+            closeFuture.get()?.let { if (!it.isDone) it.completeExceptionally(error) }
+            throw error
+        }
+    }
+
+    /**
      * Remove this run's native objects. Returns false when the level has already
      * started shutdown and therefore owns teardown; in that case the caller
      * must wait for [PhysicsLevel.closeAsync] instead of reporting success.
+     *
+     * [force] is only for [closeNow], which is already on the physics thread
+     * during shutdown and must not pretend the objects are gone.
      */
-    private fun removeNative(): Boolean {
-        if (!level.isAcceptingTasks()) return false
+    private fun removeNative(force: Boolean = false): Boolean {
+        if (!force && !level.isAcceptingTasks()) return false
         val joints = jointsView
         val links = linksView
         val failures = ArrayList<Throwable>()

@@ -26,6 +26,9 @@ import kotlin.math.abs
 import kotlin.math.floor
 
 class PhysicsChunkManager(private val physicsLevel: PhysicsLevel) {
+    // Immutable dimension metadata, captured once rather than read by builders.
+    private val minSection = physicsLevel.mcLevel.minSection
+    private val maxSection = physicsLevel.mcLevel.maxSection
     companion object {
         // Terrain physics is a local cache around dynamic bodies. One section
         // of horizontal padding covers the configured activation radius.
@@ -36,14 +39,31 @@ class PhysicsChunkManager(private val physicsLevel: PhysicsLevel) {
         const val MAX_SNAPSHOTS_PER_TICK = 8
         /** Match the mesh-free box skin; the default .04 m rounds section seams. */
         const val TERRAIN_BOX_MARGIN = 0.001f
+        /** Ticks an external region request keeps its sections alive without renewal. */
+        const val REGION_REQUEST_TTL_TICKS = 40L
     }
 
     private val chunks = ConcurrentHashMap<ChunkPos, PhysicsChunk>()
     private val sections = ConcurrentHashMap<SectionPos, PhysicsChunkSection>()
     private val dirtySections = ConcurrentHashMap.newKeySet<SectionPos>()
     private val networkDirtySections = ConcurrentHashMap.newKeySet<SectionPos>()
+    private val terrainRevisionSequence = java.util.concurrent.atomic.AtomicLong()
     private val readyPlans = ConcurrentLinkedQueue<TerrainShapePlan>()
     private val desiredActive = AtomicReference<Set<SectionPos>>(emptySet())
+    /**
+     * Regions a consumer asked for explicitly, with the tick they last asked.
+     *
+     * Some consumers do not collide with block terrain at all and therefore never
+     * produce an activation box from a body: a tracked vehicle builds its own
+     * local mesh and its bodies are masked away from [CollisionGroups.TERRAIN].
+     * It still needs the *geometry* of the blocks around it, so it declares the
+     * region it needs instead of being visible to the activation query.
+     */
+    private data class RegionRequest(val bounds: AABB, val lastTick: Long)
+
+    private val regionRequests = ConcurrentHashMap<Long, RegionRequest>()
+    private val revisionLock = Any()
+    private val inFlightSections = ConcurrentHashMap<SectionPos, PhysicsChunkSection>()
     private val stalePlans = java.util.concurrent.atomic.AtomicLong()
     private val rebuilds = java.util.concurrent.atomic.AtomicLong()
     private val buildNanos = java.util.concurrent.atomic.AtomicLong()
@@ -99,8 +119,6 @@ class PhysicsChunkManager(private val physicsLevel: PhysicsLevel) {
     }
 
     private inline fun forEachCoveredSection(box: AABB, action: (SectionPos) -> Unit) {
-        val minSection = physicsLevel.mcLevel.minSection
-        val maxSection = physicsLevel.mcLevel.maxSection
         for (x in TerrainSectionRange.indices(box.minX, box.maxX)) {
             for (z in TerrainSectionRange.indices(box.minZ, box.maxZ)) {
                 for (y in TerrainSectionRange.indices(box.minY, box.maxY)) {
@@ -110,6 +128,110 @@ class PhysicsChunkManager(private val physicsLevel: PhysicsLevel) {
             }
         }
     }
+
+    /**
+     * Detached geometry of every section that covers [bounds].
+     *
+     * This is the entry point for consumers that build their own collision from
+     * block geometry (a tracked vehicle's local mesh). It deliberately never
+     * touches `Level` or `BlockState`: the geometry comes from the section
+     * snapshots the terrain cache already produced, so it can be read from the
+     * server thread without stalling the tick on ~10^3 block shape queries.
+     *
+     * It is strict on purpose. A single missing, inactive, dirty or
+     * revision-lagging section fails the whole region instead of silently
+     * returning a partial one: a tracked vehicle must never drive on a mesh that
+     * omits geometry it is standing in.
+     */
+    fun snapshotRegion(bounds: AABB, requireActive: Boolean = true): TerrainRegionSnapshotResult =
+        synchronized(revisionLock) { snapshotRegionLocked(bounds, requireActive) }
+
+    private fun snapshotRegionLocked(bounds: AABB, requireActive: Boolean): TerrainRegionSnapshotResult {
+        if (!bounds.minX.isFinite() || !bounds.minY.isFinite() || !bounds.minZ.isFinite() ||
+            !bounds.maxX.isFinite() || !bounds.maxY.isFinite() || !bounds.maxZ.isFinite()
+        ) {
+            return TerrainRegionSnapshotResult.Missing("non-finite region")
+        }
+        if (bounds.maxX <= bounds.minX || bounds.maxY <= bounds.minY || bounds.maxZ <= bounds.minZ) {
+            return TerrainRegionSnapshotResult.Missing("degenerate region")
+        }
+        val covered = ArrayList<SectionPos>()
+        forEachCoveredSection(bounds) { covered += it }
+        if (covered.isEmpty()) return TerrainRegionSnapshotResult.Missing("empty region")
+
+        val snapshots = ArrayList<SectionSnapshot>(covered.size)
+        val revisions = LinkedHashMap<SectionPos, Long>(covered.size)
+        for (key in covered) {
+            val section = sections[key] ?: return TerrainRegionSnapshotResult.Missing("missing:$key")
+            if (requireActive && !section.active) {
+                return TerrainRegionSnapshotResult.Missing("inactive:$key")
+            }
+            val requested = section.revision.get()
+            if (section.appliedRevision != requested) {
+                return TerrainRegionSnapshotResult.Missing(
+                    "revision:$key applied=${section.appliedRevision} requested=$requested",
+                )
+            }
+            if (key in dirtySections) return TerrainRegionSnapshotResult.Missing("dirty:$key")
+            val applied = section.appliedSnapshot
+                ?: return TerrainRegionSnapshotResult.Missing("snapshot:$key")
+            if (applied.revision != section.appliedRevision) {
+                return TerrainRegionSnapshotResult.Missing(
+                    "stale-snapshot:$key snapshot=${applied.revision} applied=${section.appliedRevision}",
+                )
+            }
+            snapshots += applied
+            revisions[key] = applied.revision
+        }
+        return TerrainRegionSnapshotResult.Ready(
+            TerrainRegionSnapshot(bounds, snapshots, TerrainRevisionToken.of(revisions)),
+        )
+    }
+
+    /**
+     * Current identity of a region without copying its section geometry.
+     *
+     * This is safe to call from the physics thread: it reads only concurrent
+     * cache metadata and never accesses Level, chunks, block states or shapes.
+     * A null result means the requested region is not a complete applied cache.
+     */
+    fun revisionTokenAt(bounds: AABB, requireActive: Boolean = true): TerrainRevisionToken? =
+        synchronized(revisionLock) { revisionTokenAtLocked(bounds, requireActive) }
+
+    /** Hold the cache revision boundary across a short consumer-side install. */
+    fun <T> withRevisionToken(
+        bounds: AABB,
+        expected: TerrainRevisionToken,
+        requireActive: Boolean = true,
+        action: () -> T,
+    ): T? = synchronized(revisionLock) {
+        if (revisionTokenAtLocked(bounds, requireActive) != expected) return@synchronized null
+        action()
+    }
+
+    private fun revisionTokenAtLocked(bounds: AABB, requireActive: Boolean): TerrainRevisionToken? {
+        if (!bounds.minX.isFinite() || !bounds.minY.isFinite() || !bounds.minZ.isFinite() ||
+            !bounds.maxX.isFinite() || !bounds.maxY.isFinite() || !bounds.maxZ.isFinite() ||
+            bounds.maxX <= bounds.minX || bounds.maxY <= bounds.minY || bounds.maxZ <= bounds.minZ
+        ) return null
+
+        val revisions = LinkedHashMap<SectionPos, Long>()
+        forEachCoveredSection(bounds) { key ->
+            if (key in revisions) return@forEachCoveredSection
+            val section = sections[key] ?: return null
+            if (requireActive && !section.active) return null
+            val appliedRevision = section.appliedRevision
+            if (section.revision.get() != appliedRevision || key in dirtySections) return null
+            val snapshot = section.appliedSnapshot ?: return null
+            if (snapshot.revision != appliedRevision) return null
+            revisions[key] = appliedRevision
+        }
+        if (revisions.isEmpty()) return null
+        return TerrainRevisionToken.of(revisions)
+    }
+
+    /** True when [snapshotRegion] would currently succeed; cheap enough to poll. */
+    fun isRegionReady(bounds: AABB): Boolean = snapshotRegion(bounds).let { it is TerrainRegionSnapshotResult.Ready }
 
     private val builderExecutor: ExecutorService = Executors.newFixedThreadPool(
         (Runtime.getRuntime().availableProcessors() / 2).coerceIn(1, 2)
@@ -133,7 +255,13 @@ class PhysicsChunkManager(private val physicsLevel: PhysicsLevel) {
 
     private fun unloadSections(chunk: PhysicsChunk) {
         chunk.sections.values.forEach { section ->
-            sections.remove(section.sectionPos)
+            synchronized(revisionLock) {
+                sections.remove(section.sectionPos)
+                advanceRevision(section)
+                section.appliedRevision = -1
+                section.forgetSnapshots()
+            }
+            clearInFlight(section)
             retireLater(section)
         }
     }
@@ -212,12 +340,50 @@ class PhysicsChunkManager(private val physicsLevel: PhysicsLevel) {
     }
 
     fun markDirty(positions: Set<SectionPos>) {
-        dirtySections.addAll(positions)
+        synchronized(revisionLock) {
+            positions.forEach { position ->
+                dirtySections.add(position)
+                sections[position]?.let(::advanceRevision)
+            }
+        }
         if (!physicsLevel.mcLevel.isClientSide) networkDirtySections.addAll(positions)
     }
 
+    /**
+     * Declare a region whose block geometry a consumer needs this tick.
+     *
+     * Game thread only, and idempotent: the same box re-requested every tick keeps
+     * its sections built, cached and active. A request that stops arriving expires
+     * after [REGION_REQUEST_TTL_TICKS], so a removed vehicle cannot pin sections
+     * (and their static bodies) forever.
+     */
+    fun requestRegion(requestId: Long, bounds: AABB) {
+        if (!bounds.minX.isFinite() || !bounds.minY.isFinite() || !bounds.minZ.isFinite() ||
+            !bounds.maxX.isFinite() || !bounds.maxY.isFinite() || !bounds.maxZ.isFinite()
+        ) return
+        if (bounds.maxX <= bounds.minX || bounds.maxY <= bounds.minY || bounds.maxZ <= bounds.minZ) return
+        regionRequests[requestId] = RegionRequest(bounds, physicsLevel.mcLevel.gameTime)
+    }
+
+    /** Release one consumer's region immediately; TTL remains a crash-safety net. */
+    fun releaseRegion(requestId: Long) {
+        regionRequests.remove(requestId)
+    }
+
+    /** Live external region requests, expired ones dropped. */
+    private fun liveRegionRequests(): List<AABB> {
+        if (regionRequests.isEmpty()) return emptyList()
+        val now = physicsLevel.mcLevel.gameTime
+        regionRequests.entries.removeIf { now - it.value.lastTick > REGION_REQUEST_TTL_TICKS }
+        return regionRequests.values.map { it.bounds }
+    }
+
+    /** Number of live external region requests; diagnostics only. */
+    fun regionRequestCount(): Int = regionRequests.size
+
     fun tickMainThread(activationBoxes: List<AABB>) {
-        val activation = activationBoxes
+        val extra = liveRegionRequests()
+        val activation = if (extra.isEmpty()) activationBoxes else activationBoxes + extra
         val sectionsToBuild = HashSet<SectionPos>()
         val sectionsToRetain = HashSet<SectionPos>()
         activation.forEach { box ->
@@ -241,21 +407,26 @@ class PhysicsChunkManager(private val physicsLevel: PhysicsLevel) {
             if (sections.containsKey(position)) cacheHits.incrementAndGet()
             val physicsChunk = chunks[ChunkPos(position.x(), position.z())] ?: return@forEach
             val section = physicsChunk.getOrCreateSection(position.y()) ?: return@forEach
-            if (sections.putIfAbsent(position, section) == null) dirtySections.add(position)
+            synchronized(revisionLock) {
+                if (sections.putIfAbsent(position, section) == null) dirtySections.add(position)
+            }
         }
 
         // Do not retain native Bullet bodies for places that no dynamic body
         // can currently reach. They can be rebuilt from the loaded chunk when
         // a vehicle returns.
         sections.keys.filter { it !in sectionsToRetain }.forEach { position ->
-            val section = sections.remove(position) ?: return@forEach
+            val section = synchronized(revisionLock) {
+                sections.remove(position)?.also(::advanceRevision)
+            } ?: return@forEach
             chunks[ChunkPos(position.x(), position.z())]?.sections?.remove(position.y(), section)
-            dirtySections.remove(position)
+            synchronized(revisionLock) { dirtySections.remove(position) }
+            section.let(::clearInFlight)
             retireLater(section)
         }
         // Block updates outside the local cache must not leave permanent queue
         // entries. A newly requested section is marked dirty when created.
-        dirtySections.removeIf { !sections.containsKey(it) }
+        synchronized(revisionLock) { dirtySections.removeIf { !sections.containsKey(it) } }
 
         val active = HashSet<SectionPos>()
         activation.forEach { raw ->
@@ -289,17 +460,22 @@ class PhysicsChunkManager(private val physicsLevel: PhysicsLevel) {
         } ?: Double.POSITIVE_INFINITY
         val dirty = dirtySections.asSequence()
             .filter { sections.containsKey(it) }
+            .filter { !inFlightSections.containsKey(it) }
             .sortedWith(compareBy<SectionPos>({ it !in active }, { distanceSquared(it) }))
             .take(MAX_SNAPSHOTS_PER_TICK)
             .toList()
-        dirtySections.removeAll(dirty.toSet())
         dirty.forEach { position -> sections[position]?.let(::scheduleBuild) }
 
         flushNetworkUpdates()
     }
 
     private fun scheduleBuild(section: PhysicsChunkSection) {
-        val revision = section.revision.incrementAndGet()
+        val revision = synchronized(revisionLock) {
+            if (sections[section.sectionPos] !== section ||
+                inFlightSections.putIfAbsent(section.sectionPos, section) != null) return
+            dirtySections.remove(section.sectionPos)
+            advanceRevision(section)
+        }
         section.buildFuture?.cancel(false)
         val started = System.nanoTime()
         val snapshot = try {
@@ -310,7 +486,8 @@ class PhysicsChunkManager(private val physicsLevel: PhysicsLevel) {
             SectionSnapshot.snapshotFromChunk(physicsLevel.mcLevel, live, section.sectionPos, revision)
         } catch (error: Exception) {
             SparkCore.LOGGER.warn("Terrain snapshot failed in {}; retrying next tick", section.sectionPos, error)
-            markDirty(setOf(section.sectionPos))
+            synchronized(revisionLock) { dirtySections.add(section.sectionPos) }
+            clearInFlight(section)
             return
         }
         if (remainingRebuildTraces > 0 && traceAllows(section.sectionPos)) {
@@ -321,17 +498,29 @@ class PhysicsChunkManager(private val physicsLevel: PhysicsLevel) {
             )
         }
         section.lastSnapshot = snapshot
-        section.buildFuture = builderExecutor.submit {
-            try {
-                val built = TerrainShapePlan.build(snapshot)
-                if (section.revision.get() == revision) readyPlans.add(built)
-                else stalePlans.incrementAndGet()
-                rebuilds.incrementAndGet()
-                buildNanos.addAndGet(System.nanoTime() - started)
-            } catch (error: Throwable) {
-                SparkCore.LOGGER.error("Failed to build terrain section {}", section.sectionPos, error)
-                if (section.revision.get() == revision) markDirty(setOf(section.sectionPos))
+        section.rememberSnapshot(snapshot)
+        try {
+            section.buildFuture = builderExecutor.submit {
+                try {
+                    val built = TerrainShapePlan.build(snapshot)
+                    synchronized(revisionLock) {
+                        if (sections[section.sectionPos] === section && section.revision.get() == revision) {
+                            readyPlans.add(built)
+                        } else {
+                            stalePlans.incrementAndGet()
+                            clearInFlight(section)
+                        }
+                    }
+                    rebuilds.incrementAndGet()
+                    buildNanos.addAndGet(System.nanoTime() - started)
+                } catch (error: Throwable) {
+                    SparkCore.LOGGER.error("Failed to build terrain section {}", section.sectionPos, error)
+                    clearInFlight(section)
+                    if (section.revision.get() == revision) markDirty(setOf(section.sectionPos))
+                }
             }
+        } catch (_: RejectedExecutionException) {
+            clearInFlight(section)
         }
     }
 
@@ -340,23 +529,33 @@ class PhysicsChunkManager(private val physicsLevel: PhysicsLevel) {
         var bodiesChanged = false
         while (true) {
             val built = readyPlans.poll() ?: break
-            val section = sections[built.sectionPos] ?: continue
-            if (section.revision.get() != built.revision) {
-                stalePlans.incrementAndGet()
+            val section = sections[built.sectionPos]
+            if (section == null) {
+                inFlightSections.computeIfPresent(built.sectionPos) { _, flight ->
+                    if (flight.revision.get() == built.revision) null else flight
+                }
                 continue
             }
-            replaceBody(world, section, built)
-            bodiesChanged = true
+            if (section.revision.get() != built.revision) {
+                stalePlans.incrementAndGet()
+                clearInFlight(section)
+                continue
+            }
+            if (replaceBody(world, section, built)) bodiesChanged = true
         }
 
         val desired = desiredActive.get()
         sections.values.forEach { section ->
             val shouldBeActive = section.sectionPos in desired
-            if (shouldBeActive != section.active) {
-                section.bodies.forEach { setActive(world, it, shouldBeActive) }
-                section.active = shouldBeActive
-                bodiesChanged = true
+            val changed = synchronized(revisionLock) {
+                if (shouldBeActive == section.active) false
+                else {
+                    section.bodies.forEach { setActive(world, it, shouldBeActive) }
+                    section.active = shouldBeActive
+                    true
+                }
             }
+            if (changed) bodiesChanged = true
         }
         // Sample only when the native cache changes, not every physics substep.
         // Peaks remain useful after test vehicles release their chunks.
@@ -367,7 +566,12 @@ class PhysicsChunkManager(private val physicsLevel: PhysicsLevel) {
         }
     }
 
-    private fun replaceBody(world: PhysicsWorld, section: PhysicsChunkSection, plan: TerrainShapePlan) {
+    private fun replaceBody(world: PhysicsWorld, section: PhysicsChunkSection, plan: TerrainShapePlan): Boolean {
+        if (section.snapshotAt(plan.revision) == null) {
+            clearInFlight(section)
+            markDirty(setOf(section.sectionPos))
+            return false
+        }
         val origin = section.sectionPos
         val bodies = TerrainBoxBodies.create(plan.boxes, Vector3f(
             origin.minBlockX() + 8f, origin.minBlockY() + 8f, origin.minBlockZ() + 8f
@@ -379,9 +583,37 @@ class PhysicsChunkManager(private val physicsLevel: PhysicsLevel) {
                 setCollideWithGroups(CollisionGroups.NONE)
             }
         }
-        // Construct first, then swap all convex bodies at a step boundary.
-        // Native objects become reclaimable only after removal from the world.
-        section.bodies.forEach { discardBody(world, it) }
+        // Keep the old solver geometry until the new bodies are in the world and
+        // the complete applied snapshot can be committed under the same revision
+        // boundary external local-mesh consumers use.
+        val applied = synchronized(revisionLock) {
+            if (sections[section.sectionPos] !== section || section.revision.get() != plan.revision ||
+                section.sectionPos in dirtySections || section.snapshotAt(plan.revision) == null) {
+                bodies.forEach { discardBody(world, it) }
+                clearInFlight(section)
+                return@synchronized false
+            }
+            val shouldBeActive = section.sectionPos in desiredActive.get()
+            try {
+                bodies.forEach { setActive(world, it, shouldBeActive) }
+            } catch (error: Throwable) {
+                bodies.forEach { discardBody(world, it) }
+                clearInFlight(section)
+                throw error
+            }
+            val oldBodies = section.bodies
+            section.bodies = bodies
+            section.appliedRevision = plan.revision
+            check(section.installedSnapshot(plan.revision) != null) {
+                "Missing applied terrain snapshot for ${section.sectionPos} revision ${plan.revision}"
+            }
+            section.active = shouldBeActive
+            oldBodies.forEach { discardBody(world, it) }
+            dirtySections.remove(section.sectionPos)
+            clearInFlight(section)
+            true
+        }
+        if (!applied) return false
         if (remainingRebuildTraces > 0 && traceAllows(origin)) {
             remainingRebuildTraces--
             SparkCore.LOGGER.info(
@@ -389,10 +621,7 @@ class PhysicsChunkManager(private val physicsLevel: PhysicsLevel) {
                 origin, bodies.size, plan.revision
             )
         }
-        section.bodies = bodies
-        section.appliedRevision = plan.revision
-        section.active = section.sectionPos in desiredActive.get()
-        bodies.forEach { setActive(world, it, section.active) }
+        return true
     }
 
     private fun setActive(world: PhysicsWorld, body: PhysicsRigidBody?, active: Boolean) {
@@ -421,18 +650,28 @@ class PhysicsChunkManager(private val physicsLevel: PhysicsLevel) {
     fun destroy(world: PhysicsWorld?) {
         SparkCore.LOGGER.info("Terrain cache {}: {}", physicsLevel.name, getStats())
         sections.values.forEach { section ->
-            section.revision.incrementAndGet()
+            synchronized(revisionLock) {
+                advanceRevision(section)
+                section.appliedRevision = -1
+                section.forgetSnapshots()
+            }
             section.buildFuture?.cancel(false)
             discardInstalled(section, world)
         }
         sections.clear()
         chunks.clear()
+        inFlightSections.clear()
         readyPlans.clear()
         builderExecutor.shutdownNow()
     }
 
     private fun retireLater(section: PhysicsChunkSection) {
-        section.revision.incrementAndGet()
+        synchronized(revisionLock) {
+            advanceRevision(section)
+            section.appliedRevision = -1
+            section.forgetSnapshots()
+        }
+        clearInFlight(section)
         section.buildFuture?.cancel(false)
         physicsLevel.submitImmediateTask { discardInstalled(section, physicsLevel.worldOrNull()) }
     }
@@ -441,8 +680,22 @@ class PhysicsChunkManager(private val physicsLevel: PhysicsLevel) {
     private fun discardInstalled(section: PhysicsChunkSection, world: PhysicsWorld?) {
         section.bodies.forEach { discardBody(world, it) }
         section.bodies = emptyList()
-        section.active = false
-        section.appliedRevision = -1
+        synchronized(revisionLock) {
+            section.active = false
+            section.appliedRevision = -1
+            section.forgetSnapshots()
+        }
+    }
+
+    private fun clearInFlight(section: PhysicsChunkSection) {
+        inFlightSections.remove(section.sectionPos, section)
+    }
+
+    /** Revisions remain monotonic when a section object is evicted and recreated. */
+    private fun advanceRevision(section: PhysicsChunkSection): Long {
+        val next = terrainRevisionSequence.incrementAndGet()
+        section.revision.set(next)
+        return next
     }
 
     private fun discardBody(world: PhysicsWorld?, body: PhysicsRigidBody?) {

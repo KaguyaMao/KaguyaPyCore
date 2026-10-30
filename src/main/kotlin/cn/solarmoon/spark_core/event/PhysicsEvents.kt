@@ -24,6 +24,26 @@ class PhysicsContactEvent(
     val manifoldId: Long
 ) : Event()
 
+/**
+ * A contact point is about to be added to a manifold.
+ *
+ * Posted before Bullet stores the point, so a listener can set the tangential
+ * target (`setContactMotion1/2`), friction and lateral directions for the
+ * solver that runs later in the same substep. [PhysicsContactEvent] is only
+ * posted for points that already existed on the previous refresh, so a
+ * brand-new contact would otherwise spend its first substep without a target.
+ *
+ * This event is observational plus per-point configuration: it cannot reject
+ * the contact, because collision filtering belongs to [NeedsCollisionEvent].
+ */
+class PhysicsContactConceivedEvent(
+    val bodyA: PhysicsCollisionObject,
+    val bodyB: PhysicsCollisionObject,
+    val pointA: ManifoldPoint,
+    val pointB: ManifoldPoint,
+    val manifoldId: Long
+) : Event()
+
 class PhysicsEntityTickEvent(entity: Entity) : EntityEvent(entity)
 class PhysicsLevelInitEvent(val physicsLevel: PhysicsLevel) : LevelEvent(physicsLevel.mcLevel)
 

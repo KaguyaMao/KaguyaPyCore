@@ -1,0 +1,34 @@
+ M .gitignore
+ M PROMPT.md
+ M docs/PHYSICS_API.md
+ M docs/TERRAIN_COLLISION.md
+ M docs/THREADING_AND_LIFECYCLE.md
+ M plan.md
+ M src/main/java/cn/solarmoon/spark_core/gametest/PhysicsGameTests.java
+ M src/main/kotlin/cn/solarmoon/spark_core/physics/body/CollisionGroups.kt
+ M src/main/kotlin/cn/solarmoon/spark_core/physics/body/CollisionObjectEntity.kt
+ M src/main/kotlin/cn/solarmoon/spark_core/physics/body/RigidBodyEntity.kt
+ M src/main/kotlin/cn/solarmoon/spark_core/physics/level/PhysicsLevel.kt
+ M src/main/kotlin/cn/solarmoon/spark_core/physics/terrain/PhysicsChunkManager.kt
+ M src/main/kotlin/cn/solarmoon/spark_core/physics/terrain/PhysicsChunkSection.kt
+ M src/main/kotlin/cn/solarmoon/spark_core/physics/terrain/SectionSnapshot.kt
+ M src/main/kotlin/cn/solarmoon/spark_core/physics/terrain/TerrainShapePlan.kt
+ M src/test/kotlin/cn/solarmoon/spark_core/physics/terrain/ProbeOverWedgeTest.kt
+ M src/test/kotlin/cn/solarmoon/spark_core/physics/terrain/TerrainShapePlanTest.kt
+ M src/test/kotlin/cn/solarmoon/spark_core/physics/terrain/TerrainSlopePlannerTest.kt
+?? .opencode/
+?? docs/MCP_INTEGRATION.md
+?? docs/TRACKED_VEHICLE_SUPPORT.md
+?? docs/history/
+?? src/main/kotlin/cn/solarmoon/spark_core/physics/terrain/GroundSupportPair.kt
+?? src/main/kotlin/cn/solarmoon/spark_core/physics/terrain/TerrainSectionBuild.kt
+?? src/main/kotlin/cn/solarmoon/spark_core/physics/terrain/TerrainSectionRange.kt
+?? src/main/kotlin/cn/solarmoon/spark_core/physics/terrain/TerrainSupportBodies.kt
+?? src/main/kotlin/cn/solarmoon/spark_core/physics/terrain/support/
+?? src/test/kotlin/cn/solarmoon/spark_core/physics/terrain/GroundSupportArbitrationTest.kt
+?? src/test/kotlin/cn/solarmoon/spark_core/physics/terrain/SupportContactTimingTest.kt
+?? src/test/kotlin/cn/solarmoon/spark_core/physics/terrain/SupportDebugSampleTest.kt
+?? src/test/kotlin/cn/solarmoon/spark_core/physics/terrain/TerrainSectionLifecycleTest.kt
+?? src/test/kotlin/cn/solarmoon/spark_core/physics/terrain/TerrainSectionRangeTest.kt
+?? src/test/kotlin/cn/solarmoon/spark_core/physics/terrain/TerrainSupportFieldTest.kt
+?? src/test/kotlin/cn/solarmoon/spark_core/physics/terrain/TerrainSupportSurfaceTest.kt

@@ -199,6 +199,7 @@ object PhysicsStateInterpolator {
             completedAtNanos = to.completedAtNanos,
             bodiesById = blended,
             epoch = to.epoch,
+            metrics = to.metrics,
         )
     }
 

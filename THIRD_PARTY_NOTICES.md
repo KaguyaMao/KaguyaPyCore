@@ -1,7 +1,7 @@
 # Third-party notices
 
 The distributable Spark Core JAR embeds the Java wrapper and native binaries
-from Libbulletjme 22.0.3. Kotlin for Forge is a required external mod and is not
+from Libbulletjme 23.2.0. Kotlin for Forge is a required external mod and is not
 embedded.
 
 ## Libbulletjme / jMonkeyEngine classes

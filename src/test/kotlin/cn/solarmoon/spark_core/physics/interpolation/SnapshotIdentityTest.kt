@@ -2,6 +2,7 @@ package cn.solarmoon.spark_core.physics.interpolation
 
 import cn.solarmoon.spark_core.physics.body.BodyFrame
 import cn.solarmoon.spark_core.physics.level.PhysicsFrameSnapshot
+import cn.solarmoon.spark_core.physics.level.PhysicsStepMetrics
 import cn.solarmoon.spark_core.physics.track.TrackRunLinkFrame
 import cn.solarmoon.spark_core.physics.track.TrackRunSnapshot
 import net.minecraft.world.phys.AABB
@@ -102,6 +103,28 @@ class SnapshotIdentityTest {
         boxes.clear()
         assertEquals(setOf(1L), snapshot.bodiesById.keys)
         assertEquals(1, snapshot.terrainActivationBoxes.size)
+    }
+
+    @Test
+    fun frameMetricsArePreservedByCopiesAndInterpolation() {
+        val metrics = PhysicsStepMetrics(
+            requestTerrainNanos = 11L,
+            bulletUpdateNanos = 22L,
+            preCallbackNanos = 7L,
+            substepCount = 3,
+            bodyCount = 18,
+            kinematicBodyCount = 2,
+            terrainBodyCount = 12,
+            requestTerrainCalls = 4,
+            droppedFrameRequests = 3,
+        )
+        val from = PhysicsFrameSnapshot(1L, emptyMap(), emptyList(), 0L, 1L, metrics = metrics)
+        val to = PhysicsFrameSnapshot(2L, emptyMap(), emptyList(), 0L, 2L, metrics = metrics.copy(bodyCount = 20))
+
+        assertEquals(metrics, from.withBodiesById(emptyMap()).metrics)
+        assertEquals(to.metrics, PhysicsStateInterpolator.physicsFrame(from, to, .5f).metrics)
+        assertTrue(metrics.toString().contains("4 calls"))
+        assertTrue(metrics.toString().contains("droppedRequests=3"))
     }
 
     @Test
